@@ -131,9 +131,6 @@ This is currently a work-in-progress implementation. Contributions are welcome, 
 - Performance benchmarks
 - Bug fixes and optimizations
 
-## License
-
-This project is open source. Please check the repository for license details.
 
 ## Future Improvements
 
