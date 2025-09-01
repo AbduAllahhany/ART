@@ -1,8 +1,7 @@
 package art
 
 // todo
-// 1) unit test
-// 2) implement SIMD
+// 1) implement SIMD
 // 3) make it threadsafe
 const TerminationChar = '\xff'
 
