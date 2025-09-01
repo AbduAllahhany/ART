@@ -4,8 +4,8 @@ import "fmt"
 
 func main() {
 	t := NewART()
-	t.Insert("cat", "animal")
-	t.Insert("cats", "plural")
-	fmt.Println(t.Search("cats"))
+	t.Insert("car", "vehicle")
+	t.Insert("ca", "short")
+	fmt.Println(t.Search("ca"))
 
 }

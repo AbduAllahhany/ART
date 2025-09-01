@@ -1,9 +1,10 @@
 package main
 
-//todo
-//1) unit test
-//2) implement SIMD
-//3) make it threadsafe
+// todo
+// 1) unit test
+// 2) implement SIMD
+// 3) make it threadsafe
+const TerminationChar = '\xff' // Or any unused byte
 
 type nodeType int
 
@@ -35,30 +36,26 @@ func insert(n node, key string, l *leaf, depth int) node {
 			childPtr: [4]node{},
 		}
 		key2 := loadKey(n)
-		for i := depth; i < min(len(key2), len(key)) && key[i] == key2[i]; i++ {
-			newNode.prefix += string(key[i])
-		}
+		newNode.prefix = getCommonPrefix(key2, key)
 		depth += len(newNode.prefix)
-		newNode.addChild(key[depth], l)
-		if depth >= len(key2) {
-			newNode.addChild('\n', n)
-		} else {
-			newNode.addChild(key2[depth], n)
-		}
+		addChild(&newNode, n, key2, depth)
+		addChild(&newNode, l, key, depth)
 		return &newNode
 	}
+	curPrefix := n.getPrefix()
 	p := checkPrefix(n, key, depth)
-	if p != len(n.getPrefix()) { // prefix mismatch
+	if p != len(curPrefix) { // prefix mismatch
 		newNode := node4{
-			keys:     [4]byte{},
-			childPtr: [4]node{},
+			keys:          [4]byte{},
+			childPtr:      [4]node{},
+			numOfChildren: 0,
 		}
-		newNode.addChild(key[depth+p], l)
-		newNode.addChild(n.getPrefix()[p], n)
-		newNode.prefix = n.getPrefix()[:p+1]
+		addChild(&newNode, l, key, depth+p)
+		addChild(&newNode, n, curPrefix, p)
+		newNode.prefix = curPrefix[:p+1]
 		return &newNode
 	}
-	depth += len(n.getPrefix())
+	depth += len(curPrefix)
 	next, idx := n.findChild(key[depth])
 	if next != nil {
 		updated := insert(next, key, l, depth)
@@ -67,7 +64,7 @@ func insert(n node, key string, l *leaf, depth int) node {
 		if n.isFull() {
 			n = n.grow()
 		}
-		n.addChild(key[depth], l)
+		addChild(n, l, key, depth)
 	}
 	return n
 }
@@ -91,7 +88,7 @@ func search(n node, key string, depth int) (interface{}, bool) {
 	depth += len(n.getPrefix())
 	var next node
 	if depth >= len(key) {
-		next, _ = n.findChild('\n')
+		next, _ = n.findChild(TerminationChar)
 	} else {
 		next, _ = n.findChild(key[depth])
 	}
@@ -322,4 +319,20 @@ func checkPrefix(n node, key string, depth int) int {
 		}
 	}
 	return length
+}
+func getCommonPrefix(s1 string, s2 string) string {
+	minLen := min(len(s1), len(s2))
+	for i := 0; i < minLen; i++ {
+		if s1[i] != s2[i] {
+			return s1[:i]
+		}
+	}
+	return s1[:minLen]
+}
+func addChild(parent node, child node, key string, pos int) {
+	if pos >= len(key) {
+		parent.addChild(TerminationChar, child)
+	} else {
+		parent.addChild(key[pos], child)
+	}
 }
