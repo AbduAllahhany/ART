@@ -38,6 +38,10 @@ func insert(n node, key string, l *leaf, depth int) node {
 		key2 := loadKey(n)
 		newNode.prefix = getCommonPrefix(key, key2, depth)
 		depth += len(newNode.prefix)
+		if l.key == n.(*leaf).key {
+			n.(*leaf).val = l.val
+			return n
+		}
 		addChild(&newNode, n, key2, depth)
 		addChild(&newNode, l, key, depth)
 		return &newNode
@@ -229,21 +233,25 @@ func (n *node16) addChild(k byte, child node) {
 	n.numOfChildren++
 }
 func (n *node16) grow() node {
+	var idxArr [256]int16
+	for i := 0; i < 256; i++ {
+		idxArr[i] = -1
+	}
 	newNode := node48{
-		childIndex:    [256]byte{},
+		childIndex:    idxArr,
 		childPtr:      [48]node{},
 		numOfChildren: n.numOfChildren,
-		prefix:        "",
+		prefix:        n.prefix,
 	}
-	for i := 0; i < 16; i++ {
+	for i := 0; i < int(n.numOfChildren); i++ {
 		newNode.childPtr[i] = n.childPtr[i]
-		newNode.childIndex[n.keys[i]] = byte(i)
+		newNode.childIndex[n.keys[i]] = int16(i)
 	}
 	return &newNode
 }
 
 type node48 struct {
-	childIndex    [256]uint8
+	childIndex    [256]int16
 	childPtr      [48]node
 	numOfChildren byte
 	prefix        string
@@ -256,13 +264,13 @@ func (n *node48) getType() nodeType {
 	return nodeType48
 }
 func (n *node48) findChild(b byte) (node, int16) {
-	if n.childIndex[b] != 0 {
-		return n.childPtr[n.childIndex[b]], int16(n.childIndex[b])
+	if n.childIndex[b] != -1 {
+		return n.childPtr[n.childIndex[b]], n.childIndex[b]
 	}
 	return nil, -1
 }
 func (n *node48) addChild(b byte, child node) {
-	n.childIndex[b] = n.numOfChildren
+	n.childIndex[b] = int16(n.numOfChildren)
 	n.childPtr[n.numOfChildren] = child
 	n.numOfChildren++
 }
@@ -280,8 +288,10 @@ func (n *node48) grow() node {
 		ChildPtr: [256]node{},
 		prefix:   n.prefix,
 	}
-	for i, _ := range n.childPtr {
-		newNode.ChildPtr[n.childIndex[i]] = n.childPtr[i]
+	for char := 0; char < 256; char++ {
+		if n.childIndex[char] != -1 {
+			newNode.ChildPtr[char] = n.childPtr[n.childIndex[char]]
+		}
 	}
 	return &newNode
 }
