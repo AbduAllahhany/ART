@@ -124,30 +124,25 @@ type leaf struct {
 }
 
 func (l *leaf) findChild(b byte) (node, int16) {
-	//TODO implement me
-	panic("implement me")
+	return nil, -1
 }
 func (l *leaf) grow() node {
-	panic("implement me")
+	return nil
 }
 func (l *leaf) getType() nodeType {
 	return nodeTypeLeaf
 }
 func (l *leaf) replaceChild(i uint8, n node) {
-	//TODO implement me
-	panic("implement me")
+	return
 }
 func (l *leaf) isFull() bool {
-	//TODO implement me
-	panic("implement me")
+	return false
 }
 func (l *leaf) getPrefix() string {
-	//TODO implement me
-	panic("implement me")
+	return ""
 }
 func (l *leaf) addChild(k byte, child node) {
-	//TODO implement me
-	panic("implement me")
+	return
 }
 
 type node4 struct {
