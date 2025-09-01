@@ -1,10 +1,10 @@
-package main
+package art
 
 // todo
 // 1) unit test
 // 2) implement SIMD
 // 3) make it threadsafe
-const TerminationChar = '\xff' // Or any unused byte
+const TerminationChar = '\xff'
 
 type nodeType int
 
@@ -36,7 +36,7 @@ func insert(n node, key string, l *leaf, depth int) node {
 			childPtr: [4]node{},
 		}
 		key2 := loadKey(n)
-		newNode.prefix = getCommonPrefix(key2, key)
+		newNode.prefix = getCommonPrefix(key, key2, depth)
 		depth += len(newNode.prefix)
 		addChild(&newNode, n, key2, depth)
 		addChild(&newNode, l, key, depth)
@@ -52,11 +52,12 @@ func insert(n node, key string, l *leaf, depth int) node {
 		}
 		addChild(&newNode, l, key, depth+p)
 		addChild(&newNode, n, curPrefix, p)
-		newNode.prefix = curPrefix[:p+1]
+		newNode.prefix = curPrefix[:p]
+		n.setPrefix(curPrefix[p:])
 		return &newNode
 	}
 	depth += len(curPrefix)
-	next, idx := n.findChild(key[depth])
+	next, idx := findChild(n, key, depth)
 	if next != nil {
 		updated := insert(next, key, l, depth)
 		n.replaceChild(uint8(idx), updated)
@@ -87,11 +88,7 @@ func search(n node, key string, depth int) (interface{}, bool) {
 	}
 	depth += len(n.getPrefix())
 	var next node
-	if depth >= len(key) {
-		next, _ = n.findChild(TerminationChar)
-	} else {
-		next, _ = n.findChild(key[depth])
-	}
+	next, _ = findChild(n, key, depth)
 	return search(next, key, depth)
 }
 func (t *Tree) Insert(key string, val interface{}) {
@@ -113,6 +110,7 @@ type node interface {
 	getPrefix() string
 	addChild(k byte, child node)
 	grow() node
+	setPrefix(s string)
 }
 
 type leaf struct {
@@ -120,6 +118,8 @@ type leaf struct {
 	val interface{}
 }
 
+func (l *leaf) setPrefix(s string) {
+}
 func (l *leaf) findChild(b byte) (node, int16) {
 	return nil, -1
 }
@@ -149,6 +149,9 @@ type node4 struct {
 	prefix        string
 }
 
+func (n *node4) setPrefix(s string) {
+	n.prefix = s
+}
 func (n *node4) grow() node {
 	newNode := node16{
 		keys:          [16]uint8{},
@@ -194,6 +197,9 @@ type node16 struct {
 	prefix        string
 }
 
+func (n *node16) setPrefix(s string) {
+	n.prefix = s
+}
 func (n *node16) getType() nodeType {
 	return nodeType16
 }
@@ -243,6 +249,9 @@ type node48 struct {
 	prefix        string
 }
 
+func (n *node48) setPrefix(s string) {
+	n.prefix = s
+}
 func (n *node48) getType() nodeType {
 	return nodeType48
 }
@@ -282,6 +291,9 @@ type node256 struct {
 	prefix   string
 }
 
+func (n *node256) setPrefix(s string) {
+	n.prefix = s
+}
 func (n *node256) findChild(b byte) (node, int16) {
 	return n.ChildPtr[b], int16(b)
 
@@ -314,20 +326,20 @@ func checkPrefix(n node, key string, depth int) int {
 	prefix := n.getPrefix()
 	length := 0
 	for length = 0; length < len(prefix); length++ {
-		if key[length+depth] != prefix[length] {
+		if length+depth >= len(key) || key[length+depth] != prefix[length] {
 			break
 		}
 	}
 	return length
 }
-func getCommonPrefix(s1 string, s2 string) string {
+func getCommonPrefix(s1 string, s2 string, depth int) string {
 	minLen := min(len(s1), len(s2))
-	for i := 0; i < minLen; i++ {
+	for i := depth; i < minLen; i++ {
 		if s1[i] != s2[i] {
-			return s1[:i]
+			return s1[depth:i]
 		}
 	}
-	return s1[:minLen]
+	return s1[depth:minLen]
 }
 func addChild(parent node, child node, key string, pos int) {
 	if pos >= len(key) {
@@ -335,4 +347,10 @@ func addChild(parent node, child node, key string, pos int) {
 	} else {
 		parent.addChild(key[pos], child)
 	}
+}
+func findChild(n node, key string, depth int) (node, int16) {
+	if depth >= len(key) {
+		return n.findChild(TerminationChar)
+	}
+	return n.findChild(key[depth])
 }
