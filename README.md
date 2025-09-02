@@ -17,13 +17,52 @@ This implementation is based on the research paper "The Adaptive Radix Tree: ART
 - **Memory Efficient**: Optimized memory layout for cache performance
 - **Generic Value Storage**: Store any type of value with string keys
 
-## Current Status
+## Performance Benchmarks
 
- **Work in Progress** - This implementation is currently under development with the following todo items:
+Recent benchmarks on AMD Ryzen 5 5600H:
 
-- [ ] Unit tests
-- [ ] SIMD implementation for Node16
-- [ ] Thread safety
+### Key Results
+| Operation | ART | Go Map | Difference |
+|-----------|-----|--------|------------|
+| Insert    | 336ns | 416ns | **19% faster** |
+| Search    | 95ns  | 20ns  | 79% slower |
+
+### Detailed Performance
+```
+Insert Sequential:   295ns/op    (Best case - cache friendly)
+Insert Random:       589ns/op    (2x slower - cache misses)
+Insert Short Keys:   281ns/op    (Fastest - less prefix processing)
+Insert Long Keys:    351ns/op    (25% slower - more string operations)
+
+Search Existing:     101ns/op    (Baseline)
+Search Non-Existing: 112ns/op    (11% slower - full tree traversal)
+Search Random:       256ns/op    (2.5x slower - poor cache locality)
+```
+
+### Memory Scaling
+- 1K keys: 207.6 ns/key
+- 10K keys: 223.2 ns/key  
+- 100K keys: 260.8 ns/key
+- 1M keys: 281.6 ns/key
+
+Growth rate: ~1.35x per 10x increase in dataset size
+
+### TODO
+
+#### Priority 1 - Bug Fixes
+- [ ] Add bounds checking in checkPrefix() and getCommonPrefix()
+- [ ] Input validation for edge cases
+
+#### Priority 2 - Performance
+- [ ] Implement SIMD for Node16 (expected 3-4x search improvement)
+- [ ] Optimize string operations (use []byte internally)
+- [ ] Memory pooling for node allocation
+- [ ] Cache-friendly memory layout
+
+#### Priority 3 - Features
+- [ ] Make it threadsafe
+- [ ] Deletion operations
+- [ ] Iterator support for range queries
 
 ## Quick Start
 
@@ -98,6 +137,20 @@ The implementation uses path compression to reduce memory usage and improve cach
 - **Space**: Adaptive based on data distribution
 - **Cache-friendly**: Optimized memory layout for modern CPUs
 
+## Use Case Recommendations
+
+### Choose ART When:
+- Insert-heavy workloads (70%+ writes)
+- Memory efficiency is critical
+- Prefix-based queries are needed
+- Predictable performance required
+- Key ordering matters
+
+### Choose Go Map When:
+- Search-heavy workloads (70%+ reads)
+- Maximum search speed required
+- Simple key-value storage
+
 ## Building and Running
 
 ```bash
@@ -109,6 +162,12 @@ go run main.go
 
 # Build the project
 go build
+
+# Run tests
+go test -v ./tests
+
+# Run benchmarks
+go test -bench=. -benchmem ./tests
 ```
 
 ## References
@@ -120,24 +179,3 @@ This implementation is based on the following resources:
 - [Medium Article on ART Implementation](https://medium.com/techlog/how-i-implemented-an-art-adaptive-radix-trie-data-structure-in-go-to-increase-the-performance-of-a8a2300b246a)
 - [go-art by kellydunn](https://github.com/kellydunn/go-art)
 - [art by arriqaaq](https://github.com/arriqaaq/art)
-
-## Contributing
-
-This is currently a work-in-progress implementation. Contributions are welcome, especially for:
-
-- Unit tests
-- SIMD optimizations for Node16
-- Thread safety improvements
-- Performance benchmarks
-- Bug fixes and optimizations
-
-
-## Future Improvements
-
-- [ ] Complete unit test coverage
-- [ ] SIMD implementation for faster Node16 searches
-- [ ] Thread-safe operations using appropriate synchronization
-- [ ] Benchmarking suite
-- [ ] Memory usage optimizations
-- [ ] Support for deletion operations
-- [ ] Iterator support for range queries
