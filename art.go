@@ -1,10 +1,15 @@
 package art
 
-import "bytes"
+import (
+	"bytes"
+	"runtime"
+	"sync/atomic"
+)
 
 // todo
 // 1) implement SIMD
-// 3) make it threadsafe
+// 2) make it threadsafe
+// 3) Combine ART with a Bloom filter for ultra-fast negative lookups.
 const TerminationChar = '\xff'
 const MaxInlinePrefixLength = 8
 
@@ -85,10 +90,7 @@ func search(n node, key []byte, depth int) (interface{}, bool) {
 	}
 	if n.getType() == nodeTypeLeaf {
 		l := n.(*leaf)
-		if bytes.Equal(l.key, key) {
-			return l.val, true
-		}
-		return nil, false
+		return l.val, bytes.Equal(l.key, key)
 	}
 	pre := n.getPrefix()
 	p := checkPrefix(pre, key, depth)
@@ -101,16 +103,15 @@ func search(n node, key []byte, depth int) (interface{}, bool) {
 	next, _ = findChild(n, key, depth)
 	return search(next, key, depth)
 }
-func (t *Tree) Insert(key string, val interface{}) {
-	keyBytes := []byte(key)
+func (t *Tree) Insert(key []byte, val interface{}) {
 	l := leaf{
-		key: keyBytes,
+		key: key,
 		val: val,
 	}
-	t.node = insert(t.node, keyBytes, &l, 0)
+	t.node = insert(t.node, key, &l, 0)
 }
-func (t *Tree) Search(key string) (interface{}, bool) {
-	return search(t.node, []byte(key), 0)
+func (t *Tree) Search(key []byte) (interface{}, bool) {
+	return search(t.node, key, 0)
 }
 
 type node interface {
@@ -122,11 +123,13 @@ type node interface {
 	addChild(k byte, child node)
 	grow() node
 	setPrefix(prefix []byte)
+	version() *atomic.Uint64
 }
 
 type leaf struct {
-	key []byte
-	val interface{}
+	key                 []byte
+	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
+	val                 interface{}
 }
 
 func (l *leaf) setPrefix(prefix []byte) {
@@ -152,14 +155,16 @@ func (l *leaf) getPrefix() []byte {
 func (l *leaf) addChild(k byte, child node) {
 	return
 }
+func (l *leaf) version() *atomic.Uint64 { return l.versionLockObsolete }
 
 type node4 struct {
-	childPtr      [4]node
-	prefixPtr     []byte
-	prefix        [MaxInlinePrefixLength]byte
-	keys          [4]uint8
-	prefixLen     uint16
-	numOfChildren uint8
+	childPtr            [4]node
+	prefixPtr           []byte
+	prefix              [MaxInlinePrefixLength]byte
+	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
+	keys                [4]uint8
+	prefixLen           uint16
+	numOfChildren       uint8
 }
 
 func (n *node4) setPrefix(prefix []byte) {
@@ -214,14 +219,18 @@ func (n *node4) addChild(k byte, child node) {
 func (n *node4) replaceChild(idx uint8, child node) {
 	n.childPtr[idx] = child
 }
+func (n *node4) version() *atomic.Uint64 {
+	return n.versionLockObsolete
+}
 
 type node16 struct {
-	childPtr      [16]node
-	prefixPtr     []byte
-	keys          [16]uint8
-	prefix        [MaxInlinePrefixLength]byte
-	prefixLen     uint16
-	numOfChildren uint8
+	childPtr            [16]node
+	prefixPtr           []byte
+	keys                [16]uint8
+	prefix              [MaxInlinePrefixLength]byte
+	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
+	prefixLen           uint16
+	numOfChildren       uint8
 }
 
 func (n *node16) setPrefix(prefix []byte) {
@@ -239,7 +248,7 @@ func (n *node16) getType() nodeType {
 func (n *node16) findChild(b byte) (node, int16) {
 	//todo use SIMD
 	for i, k := range n.keys {
-		if k == byte(b) {
+		if k == b {
 			return n.childPtr[i], int16(i)
 		}
 	}
@@ -283,14 +292,18 @@ func (n *node16) grow() node {
 	}
 	return &newNode
 }
+func (n *node16) version() *atomic.Uint64 {
+	return n.versionLockObsolete
+}
 
 type node48 struct {
-	childPtr      [48]node
-	prefixPtr     []byte
-	childIndex    [256]int16
-	prefix        [MaxInlinePrefixLength]byte
-	prefixLen     uint16
-	numOfChildren uint8
+	childPtr            [48]node
+	prefixPtr           []byte
+	childIndex          [256]int16
+	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
+	prefix              [MaxInlinePrefixLength]byte
+	prefixLen           uint16
+	numOfChildren       uint8
 }
 
 func (n *node48) setPrefix(prefix []byte) {
@@ -342,12 +355,16 @@ func (n *node48) grow() node {
 	}
 	return &newNode
 }
+func (n *node48) version() *atomic.Uint64 {
+	return n.versionLockObsolete
+}
 
 type node256 struct {
-	ChildPtr  [256]node
-	prefixPtr []byte
-	prefixLen uint16
-	prefix    [MaxInlinePrefixLength]byte
+	ChildPtr            [256]node
+	prefixPtr           []byte
+	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
+	prefixLen           uint16
+	prefix              [MaxInlinePrefixLength]byte
 }
 
 func (n *node256) setPrefix(prefix []byte) {
@@ -384,8 +401,11 @@ func (n *node256) addChild(b byte, child node) {
 func (n *node256) grow() node {
 	return nil
 }
+func (n *node256) version() *atomic.Uint64 {
+	return n.versionLockObsolete
+}
 
-// helper
+// helper function
 func loadKey(n node) []byte {
 	l := n.(*leaf)
 	return l.key
@@ -420,4 +440,61 @@ func findChild(n node, key []byte, depth int) (node, int16) {
 		return n.findChild(TerminationChar)
 	}
 	return n.findChild(key[depth])
+}
+func readLockOrRestart(n node) (uint64, bool) {
+	ver := awaitNodeUnlocked(n)
+	//if obsolete try to restart
+	if ver&1 == 1 {
+		return 0, true
+	}
+	return ver, false
+
+}
+func validate(n node, version uint64) bool {
+	//atomic operation
+	ver := n.version().Load()
+	return ver == version
+}
+func writeUnlock(n node) {
+	n.version().Add(2)
+}
+func writeUnlockObsolete(n node) {
+	// set obsolete, reset locked, overflow into version
+	n.version().Add(3)
+}
+func upgradeToWriteLockOrRestart(n node, version uint64) bool {
+	return !n.version().CompareAndSwap(version, setLockedBit(version))
+}
+func writeLockOrRestart(n node) bool {
+	for {
+		version, needToRestart := readLockOrRestart(n)
+		if needToRestart {
+			return true
+		}
+		if upgradeToWriteLockOrRestart(n, version) {
+			return true
+		} else {
+			break
+		}
+
+	}
+	return false
+}
+func setLockedBit(version uint64) uint64 {
+	return version + 2
+}
+
+// there is improvement in here todo
+func awaitNodeUnlocked(n node) uint64 {
+	version := n.version().Load()
+	spinCount := 0
+	for (version & 2) == 2 {
+		if spinCount < 10 {
+			spinCount++
+		} else {
+			runtime.Gosched() // yield
+		}
+		version = n.version().Load()
+	}
+	return version
 }

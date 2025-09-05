@@ -179,3 +179,5 @@ This implementation is based on the following resources:
 - [Medium Article on ART Implementation](https://medium.com/techlog/how-i-implemented-an-art-adaptive-radix-trie-data-structure-in-go-to-increase-the-performance-of-a8a2300b246a)
 - [go-art by kellydunn](https://github.com/kellydunn/go-art)
 - [art by arriqaaq](https://github.com/arriqaaq/art)
+- [RCU for non-kernel programmers](https://www.youtube.com/watch?v=rxQ5K9lo034)
+- [Index Concurrency Control (CMU Intro to Database Systems)](https://www.youtube.com/watch?v=lgUNTj0Q54M&list=PLSE8ODhjZXjYDBpQnSymaectKjxCy6BYq&index=11)
