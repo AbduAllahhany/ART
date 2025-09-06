@@ -33,90 +33,203 @@ func NewART() Tree {
 	}
 }
 
-func insert(n node, key []byte, l *leaf, depth int) node {
-	if n == nil {
-		return l
-	}
-	if n.getType() == nodeTypeLeaf {
-		newNode := node4{
-			childPtr:      [4]node{},
-			prefixPtr:     nil,
-			prefix:        [8]byte{},
-			keys:          [4]byte{},
-			prefixLen:     0,
-			numOfChildren: 0,
+func insert(n node, key []byte, l *leaf, depth int, parent node, parentVersion uint64) node {
+restart:
+	curNodeAddress := &n
+	for {
+		curNode := *curNodeAddress
+		if curNode == nil {
+			*curNodeAddress = l
+			break
 		}
-		key2 := loadKey(n)
-		newNode.setPrefix(getCommonPrefix(key, key2, depth))
-		depth += int(newNode.prefixLen)
-		if bytes.Equal(n.(*leaf).key, key) {
-			n.(*leaf).val = l.val
-			return n
+		version, needToRestart := readLockOrRestart(curNode)
+		if needToRestart {
+			goto restart
 		}
-		addChild(&newNode, n, key2, depth)
-		addChild(&newNode, l, key, depth)
-		return &newNode
-	}
-	curPrefix := n.getPrefix()
-	p := checkPrefix(curPrefix, key, depth)
-	if p != len(curPrefix) { // prefix mismatch
-		newNode := node4{
-			keys:          [4]byte{},
-			childPtr:      [4]node{},
-			numOfChildren: 0,
+		curPrefix := curNode.getPrefix()
+		p := checkPrefix(curPrefix, key, depth)
+		if p != len(curPrefix) { // prefix mismatch
+			newNode := node4{
+				childPtr:            [4]node{},
+				prefixPtr:           nil,
+				prefix:              [8]byte{},
+				versionLockObsolete: &atomic.Uint64{},
+				keys:                [4]byte{},
+				prefixLen:           0,
+				numOfChildren:       0,
+			}
+			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
+			if needToRestart {
+				goto restart
+			}
+			needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+			if needToRestart {
+				writeUnlock(parent)
+				goto restart
+			}
+			newNode.setPrefix(curPrefix[:p])
+			curNode.setPrefix(curPrefix[p:])
+			addChild(&newNode, l, key, depth+p)
+			addChild(&newNode, curNode, curPrefix, p)
+			*curNodeAddress = &newNode
+			writeUnlock(curNode)
+			writeUnlock(parent)
+			break
 		}
-		addChild(&newNode, l, key, depth+p)
-		addChild(&newNode, n, curPrefix, p)
-		newNode.setPrefix(curPrefix[:p])
-		n.setPrefix(curPrefix[p:])
-		return &newNode
-	}
-	depth += len(curPrefix)
-	next, idx := findChild(n, key, depth)
-	if next != nil {
-		updated := insert(next, key, l, depth)
-		n.replaceChild(uint8(idx), updated)
-	} else {
-		if n.isFull() {
-			n = n.grow()
+		depth += len(curPrefix)
+		needToRestart = !validate(curNode, version)
+		if needToRestart {
+			goto restart
 		}
-		addChild(n, l, key, depth)
+		next := findChild(curNode, key, depth)
+		if next == nil {
+			if curNode.isFull() {
+				needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
+				if needToRestart {
+					goto restart
+				}
+				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+				if needToRestart {
+					writeUnlock(parent)
+					goto restart
+				}
+				grown := curNode.grow()
+				addChild(grown, l, key, depth)
+				writeUnlockObsolete(curNode)
+				*curNodeAddress = grown
+				writeUnlock(parent)
+			} else {
+				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+				if needToRestart {
+					goto restart
+				}
+				needToRestart = !validate(parent, parentVersion)
+				if needToRestart {
+					goto restart
+				}
+				addChild(curNode, l, key, depth)
+				writeUnlock(curNode)
+			}
+			break
+		}
+		needToRestart = !validate(parent, parentVersion)
+		if needToRestart {
+			goto restart
+		}
+		if curNode.getType() == nodeTypeLeaf {
+			if bytes.Equal(curNode.(*leaf).key, key) {
+				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+				if needToRestart {
+					writeUnlock(parent)
+					goto restart
+				}
+				curNode.(*leaf).val = l.val
+				writeUnlock(curNode)
+				break
+			}
+
+			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
+			if needToRestart {
+				goto restart
+			}
+			needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+			if needToRestart {
+				writeUnlock(parent)
+				goto restart
+			}
+			newNode := node4{
+				childPtr:            [4]node{},
+				prefixPtr:           nil,
+				prefix:              [8]byte{},
+				keys:                [4]byte{},
+				prefixLen:           0,
+				numOfChildren:       0,
+				versionLockObsolete: &atomic.Uint64{},
+			}
+			key2 := loadKey(curNode)
+			newNode.setPrefix(getCommonPrefix(key, key2, depth))
+			depth += int(newNode.prefixLen)
+			//simd
+
+			addChild(&newNode, curNode, key2, depth)
+			addChild(&newNode, l, key, depth)
+			*curNodeAddress = &newNode
+			writeUnlock(curNode)
+			writeUnlock(parent)
+			break
+		}
+		parent = curNode
+		parentVersion = version
+		curNodeAddress = next
 	}
 	return n
 }
-func search(n node, key []byte, depth int) (interface{}, bool) {
-	if n == nil {
+func search(n node, key []byte, depth int, parent node, versionParent uint64) (interface{}, bool) {
+restart:
+	curNode := n
+	if curNode == nil {
 		return nil, false
 	}
-	if n.getType() == nodeTypeLeaf {
-		l := n.(*leaf)
-		return l.val, bytes.Equal(l.key, key)
+	for {
+		version, needToRestart := readLockOrRestart(n)
+		if needToRestart {
+			goto restart
+		}
+		needToRestart = !validate(parent, versionParent)
+		pre := curNode.getPrefix()
+		p := checkPrefix(pre, key, depth)
+		l := len(pre)
+		if p != l {
+			needToRestart = !validate(n, version)
+			if needToRestart {
+				goto restart
+			}
+			return nil, false
+		}
+		depth += len(curNode.getPrefix())
+		nextAdd := findChild(curNode, key, depth)
+		needToRestart = !validate(n, version)
+		if curNode.getType() == nodeTypeLeaf {
+			l := curNode.(*leaf)
+			needToRestart = !validate(n, version)
+			if needToRestart {
+				goto restart
+			}
+			if bytes.Equal(l.key, key) {
+				return l.val, true
+			}
+			return nil, false
+		}
+		if needToRestart {
+			goto restart
+		}
+		if nextAdd != nil {
+			curNode = *nextAdd
+		} else {
+			needToRestart = !validate(n, version)
+			if needToRestart {
+				goto restart
+			}
+			break
+		}
 	}
-	pre := n.getPrefix()
-	p := checkPrefix(pre, key, depth)
-	l := len(pre)
-	if p != l {
-		return nil, false
-	}
-	depth += len(n.getPrefix())
-	var next node
-	next, _ = findChild(n, key, depth)
-	return search(next, key, depth)
+	return nil, false
 }
 func (t *Tree) Insert(key []byte, val interface{}) {
 	l := leaf{
-		key: key,
-		val: val,
+		key:                 key,
+		val:                 val,
+		versionLockObsolete: &atomic.Uint64{},
 	}
-	t.node = insert(t.node, key, &l, 0)
+	t.node = insert(t.node, key, &l, 0, nil, 0)
 }
 func (t *Tree) Search(key []byte) (interface{}, bool) {
-	return search(t.node, key, 0)
+	return search(t.node, key, 0, nil, 0)
 }
 
 type node interface {
 	getType() nodeType
-	findChild(b byte) (node, int16)
+	findChild(b byte) *node
 	replaceChild(uint8, node)
 	isFull() bool
 	getPrefix() []byte
@@ -134,8 +247,8 @@ type leaf struct {
 
 func (l *leaf) setPrefix(prefix []byte) {
 }
-func (l *leaf) findChild(b byte) (node, int16) {
-	return nil, -1
+func (l *leaf) findChild(b byte) *node {
+	return nil
 }
 func (l *leaf) grow() node {
 	return nil
@@ -178,12 +291,13 @@ func (n *node4) setPrefix(prefix []byte) {
 }
 func (n *node4) grow() node {
 	newNode := node16{
-		childPtr:      [16]node{},
-		prefixPtr:     n.prefixPtr,
-		keys:          [16]uint8{},
-		prefix:        n.prefix,
-		prefixLen:     n.prefixLen,
-		numOfChildren: n.numOfChildren,
+		childPtr:            [16]node{},
+		prefixPtr:           n.prefixPtr,
+		keys:                [16]uint8{},
+		prefix:              n.prefix,
+		prefixLen:           n.prefixLen,
+		numOfChildren:       n.numOfChildren,
+		versionLockObsolete: &atomic.Uint64{},
 	}
 	copy(newNode.keys[:], n.keys[:])
 	copy(newNode.childPtr[:], n.childPtr[:])
@@ -202,14 +316,14 @@ func (n *node4) getType() nodeType {
 func (n *node4) isFull() bool {
 	return n.numOfChildren == 4
 }
-func (n *node4) findChild(b byte) (node, int16) {
+func (n *node4) findChild(b byte) *node {
 	//simple search over keys
 	for i, k := range n.keys {
 		if k == b {
-			return n.childPtr[i], int16(i)
+			return &n.childPtr[i]
 		}
 	}
-	return nil, -1
+	return nil
 }
 func (n *node4) addChild(k byte, child node) {
 	n.keys[n.numOfChildren] = k
@@ -245,14 +359,14 @@ func (n *node16) setPrefix(prefix []byte) {
 func (n *node16) getType() nodeType {
 	return nodeType16
 }
-func (n *node16) findChild(b byte) (node, int16) {
+func (n *node16) findChild(b byte) *node {
 	//todo use SIMD
 	for i, k := range n.keys {
 		if k == b {
-			return n.childPtr[i], int16(i)
+			return &n.childPtr[i]
 		}
 	}
-	return nil, -1
+	return nil
 
 }
 func (n *node16) replaceChild(idx uint8, child node) {
@@ -279,12 +393,13 @@ func (n *node16) grow() node {
 		idxArr[i] = -1
 	}
 	newNode := node48{
-		childPtr:      [48]node{},
-		prefixPtr:     n.prefixPtr,
-		childIndex:    idxArr,
-		prefix:        n.prefix,
-		prefixLen:     n.prefixLen,
-		numOfChildren: n.numOfChildren,
+		childPtr:            [48]node{},
+		prefixPtr:           n.prefixPtr,
+		childIndex:          idxArr,
+		prefix:              n.prefix,
+		prefixLen:           n.prefixLen,
+		numOfChildren:       n.numOfChildren,
+		versionLockObsolete: &atomic.Uint64{},
 	}
 	for i := 0; i < int(n.numOfChildren); i++ {
 		newNode.childPtr[i] = n.childPtr[i]
@@ -318,11 +433,11 @@ func (n *node48) setPrefix(prefix []byte) {
 func (n *node48) getType() nodeType {
 	return nodeType48
 }
-func (n *node48) findChild(b byte) (node, int16) {
+func (n *node48) findChild(b byte) *node {
 	if n.childIndex[b] != -1 {
-		return n.childPtr[n.childIndex[b]], n.childIndex[b]
+		return &n.childPtr[n.childIndex[b]]
 	}
-	return nil, -1
+	return nil
 }
 func (n *node48) addChild(b byte, child node) {
 	n.childIndex[b] = int16(n.numOfChildren)
@@ -343,10 +458,11 @@ func (n *node48) getPrefix() []byte {
 }
 func (n *node48) grow() node {
 	newNode := node256{
-		ChildPtr:  [256]node{},
-		prefixPtr: n.prefixPtr,
-		prefixLen: n.prefixLen,
-		prefix:    n.prefix,
+		ChildPtr:            [256]node{},
+		prefixPtr:           n.prefixPtr,
+		prefixLen:           n.prefixLen,
+		prefix:              n.prefix,
+		versionLockObsolete: &atomic.Uint64{},
 	}
 	for char := 0; char < 256; char++ {
 		if n.childIndex[char] != -1 {
@@ -376,8 +492,11 @@ func (n *node256) setPrefix(prefix []byte) {
 	}
 	n.prefixPtr = prefix
 }
-func (n *node256) findChild(b byte) (node, int16) {
-	return n.ChildPtr[b], int16(b)
+func (n *node256) findChild(b byte) *node {
+	if n.ChildPtr[b] != nil {
+		return &n.ChildPtr[b]
+	}
+	return nil
 
 }
 func (n *node256) getType() nodeType {
@@ -435,13 +554,16 @@ func addChild(parent node, child node, key []byte, pos int) {
 		parent.addChild(key[pos], child)
 	}
 }
-func findChild(n node, key []byte, depth int) (node, int16) {
+func findChild(n node, key []byte, depth int) *node {
 	if depth >= len(key) {
 		return n.findChild(TerminationChar)
 	}
 	return n.findChild(key[depth])
 }
 func readLockOrRestart(n node) (uint64, bool) {
+	if n == nil {
+		return 0, false
+	}
 	ver := awaitNodeUnlocked(n)
 	//if obsolete try to restart
 	if ver&1 == 1 {
@@ -451,18 +573,30 @@ func readLockOrRestart(n node) (uint64, bool) {
 
 }
 func validate(n node, version uint64) bool {
+	if n == nil {
+		return true
+	}
 	//atomic operation
 	ver := n.version().Load()
 	return ver == version
 }
 func writeUnlock(n node) {
+	if n == nil {
+		return
+	}
 	n.version().Add(2)
 }
 func writeUnlockObsolete(n node) {
+	if n == nil {
+		return
+	}
 	// set obsolete, reset locked, overflow into version
 	n.version().Add(3)
 }
 func upgradeToWriteLockOrRestart(n node, version uint64) bool {
+	if n == nil {
+		return false
+	}
 	return !n.version().CompareAndSwap(version, setLockedBit(version))
 }
 func writeLockOrRestart(n node) bool {
@@ -486,6 +620,9 @@ func setLockedBit(version uint64) uint64 {
 
 // there is improvement in here todo
 func awaitNodeUnlocked(n node) uint64 {
+	if n == nil {
+		return 0
+	}
 	version := n.version().Load()
 	spinCount := 0
 	for (version & 2) == 2 {

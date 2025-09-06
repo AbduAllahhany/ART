@@ -3,8 +3,11 @@ package art
 import (
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -510,4 +513,390 @@ func BenchmarkStressTest(b *testing.B) {
 			tree.Search([]byte(key))
 		}
 	}
+}
+
+// Benchmark data generators
+func generateRandomKeys(count int, keyLength int) [][]byte {
+	keys := make([][]byte, count)
+	for i := 0; i < count; i++ {
+		key := make([]byte, keyLength)
+		rand.Read(key)
+		keys[i] = key
+	}
+	return keys
+}
+
+func generateSequentialKeys(count int, keyLength int) [][]byte {
+	keys := make([][]byte, count)
+	for i := 0; i < count; i++ {
+		key := make([]byte, keyLength)
+		for j := 0; j < keyLength; j++ {
+			key[j] = byte((i + j) % 256)
+		}
+		keys[i] = key
+	}
+	return keys
+}
+
+func generateCommonPrefixKeys(count int, prefixLength int, suffixLength int) [][]byte {
+	keys := make([][]byte, count)
+	prefix := make([]byte, prefixLength)
+	rand.Read(prefix)
+
+	for i := 0; i < count; i++ {
+		key := make([]byte, prefixLength+suffixLength)
+		copy(key, prefix)
+
+		suffix := make([]byte, suffixLength)
+		rand.Read(suffix)
+		copy(key[prefixLength:], suffix)
+
+		keys[i] = key
+	}
+	return keys
+}
+
+// Basic single-threaded baseline benchmarks
+func BenchmarkSingleThreadInsert(b *testing.B) {
+	tree := NewART()
+	keys := generateRandomKeys(b.N, 16)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tree.Insert(keys[i], i)
+	}
+}
+
+func BenchmarkSingleThreadSearch(b *testing.B) {
+	tree := NewART()
+	keys := generateRandomKeys(10000, 16)
+
+	// Pre-populate the tree
+	for i, key := range keys {
+		tree.Insert(key, i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tree.Search(keys[i%len(keys)])
+	}
+}
+
+// Multithreaded insert benchmarks
+func BenchmarkMultiThreadInsert(b *testing.B) {
+	threadCounts := []int{2, 4, 8, 16, 32}
+
+	for _, numThreads := range threadCounts {
+		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
+			tree := NewART()
+			keys := generateRandomKeys(b.N, 16)
+
+			var wg sync.WaitGroup
+			keysPerThread := b.N / numThreads
+
+			b.ResetTimer()
+			for t := 0; t < numThreads; t++ {
+				wg.Add(1)
+				go func(threadID int) {
+					defer wg.Done()
+					start := threadID * keysPerThread
+					end := start + keysPerThread
+					if threadID == numThreads-1 {
+						end = b.N // Handle remainder
+					}
+
+					for i := start; i < end; i++ {
+						tree.Insert(keys[i], i)
+					}
+				}(t)
+			}
+			wg.Wait()
+		})
+	}
+}
+
+// Multithreaded search benchmarks
+func BenchmarkMultiThreadSearch(b *testing.B) {
+	threadCounts := []int{2, 4, 8, 16, 32}
+
+	for _, numThreads := range threadCounts {
+		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
+			tree := NewART()
+			keys := generateRandomKeys(100000, 16)
+
+			// Pre-populate the tree
+			for i, key := range keys {
+				tree.Insert(key, i)
+			}
+
+			var wg sync.WaitGroup
+			opsPerThread := b.N / numThreads
+
+			b.ResetTimer()
+			for t := 0; t < numThreads; t++ {
+				wg.Add(1)
+				go func(threadID int) {
+					defer wg.Done()
+					for i := 0; i < opsPerThread; i++ {
+						keyIndex := (threadID*opsPerThread + i) % len(keys)
+						tree.Search(keys[keyIndex])
+					}
+				}(t)
+			}
+			wg.Wait()
+		})
+	}
+}
+
+// Mixed workload benchmarks (insert + search)
+func BenchmarkMultiThreadMixed(b *testing.B) {
+	ratios := []struct {
+		name      string
+		insertPct int
+		searchPct int
+	}{
+		{"90Read10Write", 10, 90},
+		{"50Read50Write", 50, 50},
+		{"10Read90Write", 90, 10},
+	}
+
+	threadCounts := []int{2, 4, 8, 16}
+
+	for _, ratio := range ratios {
+		for _, numThreads := range threadCounts {
+			b.Run(fmt.Sprintf("%s-Threads-%d", ratio.name, numThreads), func(b *testing.B) {
+				tree := NewART()
+				keys := generateRandomKeys(100000, 16)
+
+				// Pre-populate with some initial data
+				for i := 0; i < len(keys)/2; i++ {
+					tree.Insert(keys[i], i)
+				}
+
+				var wg sync.WaitGroup
+				opsPerThread := b.N / numThreads
+
+				b.ResetTimer()
+				for t := 0; t < numThreads; t++ {
+					wg.Add(1)
+					go func(threadID int) {
+						defer wg.Done()
+						for i := 0; i < opsPerThread; i++ {
+							keyIndex := (threadID*opsPerThread + i) % len(keys)
+
+							if i%100 < ratio.insertPct {
+								// Insert operation
+								tree.Insert(keys[keyIndex], keyIndex)
+							} else {
+								// Search operation
+								tree.Search(keys[keyIndex])
+							}
+						}
+					}(t)
+				}
+				wg.Wait()
+			})
+		}
+	}
+}
+
+// Contention benchmarks - test hotspot scenarios
+func BenchmarkContention(b *testing.B) {
+	scenarioTypes := []struct {
+		name string
+		fn   func(int) [][]byte
+	}{
+		{"RandomKeys", func(n int) [][]byte { return generateRandomKeys(n, 16) }},
+		{"SequentialKeys", func(n int) [][]byte { return generateSequentialKeys(n, 16) }},
+		{"CommonPrefix", func(n int) [][]byte { return generateCommonPrefixKeys(n, 8, 8) }},
+	}
+
+	for _, scenario := range scenarioTypes {
+		b.Run(scenario.name, func(b *testing.B) {
+			tree := NewART()
+			keys := scenario.fn(b.N)
+			numThreads := runtime.GOMAXPROCS(0)
+
+			var wg sync.WaitGroup
+			keysPerThread := b.N / numThreads
+
+			b.ResetTimer()
+			for t := 0; t < numThreads; t++ {
+				wg.Add(1)
+				go func(threadID int) {
+					defer wg.Done()
+					start := threadID * keysPerThread
+					end := start + keysPerThread
+					if threadID == numThreads-1 {
+						end = b.N
+					}
+
+					for i := start; i < end; i++ {
+						tree.Insert(keys[i], i)
+					}
+				}(t)
+			}
+			wg.Wait()
+		})
+	}
+}
+
+// Lock contention and restart measurement
+type ContentionStats struct {
+	TotalOps  int64
+	Restarts  int64
+	LockWaits int64
+}
+
+var globalStats ContentionStats
+
+// This would need to be integrated into your ART implementation
+// to track restarts and lock waits
+func BenchmarkContentionAnalysis(b *testing.B) {
+	tree := NewART()
+	keys := generateRandomKeys(b.N, 16)
+	numThreads := runtime.GOMAXPROCS(0)
+
+	atomic.StoreInt64(&globalStats.TotalOps, 0)
+	atomic.StoreInt64(&globalStats.Restarts, 0)
+	atomic.StoreInt64(&globalStats.LockWaits, 0)
+
+	var wg sync.WaitGroup
+	keysPerThread := b.N / numThreads
+
+	b.ResetTimer()
+	start := time.Now()
+
+	for t := 0; t < numThreads; t++ {
+		wg.Add(1)
+		go func(threadID int) {
+			defer wg.Done()
+			startIdx := threadID * keysPerThread
+			endIdx := startIdx + keysPerThread
+			if threadID == numThreads-1 {
+				endIdx = b.N
+			}
+
+			for i := startIdx; i < endIdx; i++ {
+				tree.Insert(keys[i], i)
+				atomic.AddInt64(&globalStats.TotalOps, 1)
+				// Note: You'd need to instrument your ART code to increment
+				// globalStats.Restarts and globalStats.LockWaits
+			}
+		}(t)
+	}
+	wg.Wait()
+
+	duration := time.Since(start)
+	totalOps := atomic.LoadInt64(&globalStats.TotalOps)
+	restarts := atomic.LoadInt64(&globalStats.Restarts)
+	lockWaits := atomic.LoadInt64(&globalStats.LockWaits)
+
+	b.ReportMetric(float64(totalOps)/duration.Seconds(), "ops/sec")
+	b.ReportMetric(float64(restarts)/float64(totalOps)*100, "restart_pct")
+	b.ReportMetric(float64(lockWaits)/float64(totalOps)*100, "lock_wait_pct")
+}
+
+// Scalability benchmark - measure performance vs thread count
+func BenchmarkScalability(b *testing.B) {
+	maxThreads := runtime.GOMAXPROCS(0) * 2
+	keys := generateRandomKeys(100000, 16)
+
+	for numThreads := 1; numThreads <= maxThreads; numThreads *= 2 {
+		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
+			tree := NewART()
+
+			var wg sync.WaitGroup
+			opsPerThread := b.N / numThreads
+
+			b.ResetTimer()
+			start := time.Now()
+
+			for t := 0; t < numThreads; t++ {
+				wg.Add(1)
+				go func(threadID int) {
+					defer wg.Done()
+					for i := 0; i < opsPerThread; i++ {
+						keyIndex := (threadID*opsPerThread + i) % len(keys)
+						tree.Insert(keys[keyIndex], keyIndex)
+					}
+				}(t)
+			}
+			wg.Wait()
+
+			duration := time.Since(start)
+			totalOps := int64(b.N)
+			b.ReportMetric(float64(totalOps)/duration.Seconds(), "ops/sec")
+			b.ReportMetric(float64(totalOps)/duration.Seconds()/float64(numThreads), "ops/sec/thread")
+		})
+	}
+}
+
+// Memory pressure benchmark
+func BenchmarkMemoryPressure(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("Size-%d", size), func(b *testing.B) {
+			tree := NewART()
+			keys := generateRandomKeys(size, 16)
+			numThreads := runtime.GOMAXPROCS(0)
+
+			// Pre-populate to create memory pressure
+			for i, key := range keys {
+				tree.Insert(key, i)
+			}
+
+			var wg sync.WaitGroup
+			opsPerThread := b.N / numThreads
+
+			b.ResetTimer()
+			for t := 0; t < numThreads; t++ {
+				wg.Add(1)
+				go func(threadID int) {
+					defer wg.Done()
+					for i := 0; i < opsPerThread; i++ {
+						keyIndex := (threadID*opsPerThread + i) % len(keys)
+						// Mix of operations to stress the system
+						if i%3 == 0 {
+							tree.Insert(keys[keyIndex], keyIndex+1000000) // Update
+						} else {
+							tree.Search(keys[keyIndex])
+						}
+					}
+				}(t)
+			}
+			wg.Wait()
+		})
+	}
+}
+
+// Helper function to run a comprehensive benchmark suite
+func BenchmarkFullSuite(b *testing.B) {
+	b.Run("SingleThread", BenchmarkSingleThreadInsert)
+	b.Run("MultiThread", BenchmarkMultiThreadInsert)
+	b.Run("Mixed", BenchmarkMultiThreadMixed)
+	b.Run("Contention", BenchmarkContention)
+	b.Run("Scalability", BenchmarkScalability)
+}
+
+// Utility benchmark to measure key generation overhead
+func BenchmarkKeyGeneration(b *testing.B) {
+	b.Run("Random", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			generateRandomKeys(1000, 16)
+		}
+	})
+
+	b.Run("Sequential", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			generateSequentialKeys(1000, 16)
+		}
+	})
+
+	b.Run("CommonPrefix", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			generateCommonPrefixKeys(1000, 8, 8)
+		}
+	})
 }
