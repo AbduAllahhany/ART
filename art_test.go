@@ -1,6 +1,7 @@
 package art
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"runtime"
@@ -519,13 +520,16 @@ func BenchmarkStressTest(b *testing.B) {
 func generateRandomKeys(count int, keyLength int) [][]byte {
 	keys := make([][]byte, count)
 	for i := 0; i < count; i++ {
+		// Use counter to ensure uniqueness
 		key := make([]byte, keyLength)
-		rand.Read(key)
+		binary.BigEndian.PutUint64(key[0:8], uint64(i))
+		if keyLength > 8 {
+			rand.Read(key[8:]) // Fill rest with random
+		}
 		keys[i] = key
 	}
 	return keys
 }
-
 func generateSequentialKeys(count int, keyLength int) [][]byte {
 	keys := make([][]byte, count)
 	for i := 0; i < count; i++ {
@@ -584,7 +588,7 @@ func BenchmarkSingleThreadSearch(b *testing.B) {
 
 // Multithreaded insert benchmarks
 func BenchmarkMultiThreadInsert(b *testing.B) {
-	threadCounts := []int{2, 4, 8, 16, 32}
+	threadCounts := []int{1, 2, 4, 8, 16, 32}
 
 	for _, numThreads := range threadCounts {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
@@ -899,4 +903,89 @@ func BenchmarkKeyGeneration(b *testing.B) {
 			generateCommonPrefixKeys(1000, 8, 8)
 		}
 	})
+}
+
+// Simple test with timeout to detect deadlocks
+func TestSimpleMultithread(t *testing.T) {
+	tree := NewART()
+
+	numThreads := 12
+	insertsPerThread := 1000
+
+	var wg sync.WaitGroup
+	done := make(chan bool)
+	// Start threads
+	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
+		go func(threadID int) {
+			defer wg.Done()
+
+			for j := 0; j < insertsPerThread; j++ {
+				key := fmt.Sprintf("thread_%d_key_%d", threadID, j)
+				value := threadID*1000 + j
+				tree.Insert([]byte(key), value)
+			}
+		}(i)
+	}
+
+	// Wait for completion or timeout
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		fmt.Println("Test completed successfully!")
+
+		// Verify all keys were inserted
+		for i := 0; i < numThreads; i++ {
+			for j := 0; j < insertsPerThread; j++ {
+				key := fmt.Sprintf("thread_%d_key_%d", i, j)
+				expectedValue := i*1000 + j
+
+				value, found := tree.Search([]byte(key))
+				if !found {
+					t.Errorf("Key not found: %s", key)
+				} else if value.(int) != expectedValue {
+					t.Errorf("Wrong value for key %s: got %d, expected %d", key, value.(int), expectedValue)
+				}
+			}
+		}
+
+	}
+}
+
+// Simple test single-threaded insert
+func TestSimpleSingleThread(t *testing.T) {
+	tree := NewART()
+
+	numThreads := 12
+	insertsPerThread := 2
+
+	// Insert all keys in a single thread
+	for i := 0; i < numThreads; i++ {
+		for j := 0; j < insertsPerThread; j++ {
+			key := fmt.Sprintf("thread_%d_key_%d", i, j)
+			value := i*1000 + j
+			tree.Insert([]byte(key), value)
+		}
+	}
+
+	fmt.Println("Single-thread test completed successfully!")
+
+	// Verify all keys were inserted
+	for i := 0; i < numThreads; i++ {
+		for j := 0; j < insertsPerThread; j++ {
+			key := fmt.Sprintf("thread_%d_key_%d", i, j)
+			expectedValue := i*1000 + j
+
+			value, found := tree.Search([]byte(key))
+			if !found {
+				t.Errorf("Key not found: %s", key)
+			} else if value.(int) != expectedValue {
+				t.Errorf("Wrong value for key %s: got %d, expected %d", key, value.(int), expectedValue)
+			}
+		}
+	}
 }

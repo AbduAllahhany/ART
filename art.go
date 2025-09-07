@@ -7,11 +7,17 @@ import (
 )
 
 // todo
-// 1) implement SIMD
-// 2) make it threadsafe
+// 1) Implement SIMD
+// 2) Make it threadsafe
 // 3) Combine ART with a Bloom filter for ultra-fast negative lookups.
+// 4) Improve performance after the OLC shit
 const TerminationChar = '\xff'
 const MaxInlinePrefixLength = 8
+const (
+	OBSOLETE_BIT   = uint64(1)
+	LOCK_BIT       = uint64(1 << 1)
+	LOCK_INCREMENT = uint64(2)
+)
 
 type nodeType int
 
@@ -33,82 +39,106 @@ func NewART() Tree {
 	}
 }
 
-func insert(n node, key []byte, l *leaf, depth int, parent node, parentVersion uint64) node {
+var debugCounter int64
+
+func (t *Tree) insert(key []byte, l *leaf, depth int, parent *node, parentVersion uint64) {
 restart:
-	curNodeAddress := &n
+	parent = nil
+	parentVersion = 0
+	depth = 0
+	curNodeAddress := &t.node
 	for {
-		curNode := *curNodeAddress
-		if curNode == nil {
+		if *curNodeAddress == nil {
 			*curNodeAddress = l
 			break
 		}
-		version, needToRestart := readLockOrRestart(curNode)
+		version, needToRestart := readLockOrRestart(curNodeAddress)
 		if needToRestart {
 			goto restart
 		}
-		curPrefix := curNode.getPrefix()
-		p := checkPrefix(curPrefix, key, depth)
-		if p != len(curPrefix) { // prefix mismatch
-			newNode := node4{
-				childPtr:            [4]node{},
-				prefixPtr:           nil,
-				prefix:              [8]byte{},
-				versionLockObsolete: &atomic.Uint64{},
-				keys:                [4]byte{},
-				prefixLen:           0,
-				numOfChildren:       0,
-			}
+		if (*curNodeAddress).getType() == nodeTypeLeaf {
 			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
 			if needToRestart {
 				goto restart
 			}
-			needToRestart = upgradeToWriteLockOrRestart(curNode, version)
+			needToRestart = upgradeToWriteLockOrRestart(curNodeAddress, version)
 			if needToRestart {
 				writeUnlock(parent)
 				goto restart
 			}
-			newNode.setPrefix(curPrefix[:p])
-			curNode.setPrefix(curPrefix[p:])
-			addChild(&newNode, l, key, depth+p)
-			addChild(&newNode, curNode, curPrefix, p)
-			*curNodeAddress = &newNode
-			writeUnlock(curNode)
+			if bytes.Equal((*curNodeAddress).(*leaf).key, key) {
+				(*curNodeAddress).(*leaf).val = l.val
+				writeUnlock(parent)
+				writeUnlock(curNodeAddress)
+				break
+			}
+			newNode := newNode4()
+			key2 := loadKey(*curNodeAddress)
+			newNode.setPrefix(getCommonPrefix(key, key2, depth))
+			depth += int(newNode.prefixLen)
+			addChild(newNode, *curNodeAddress, key2, depth)
+			addChild(newNode, l, key, depth)
 			writeUnlock(parent)
+			writeUnlock(curNodeAddress)
+			//should be atomic
+			*curNodeAddress = newNode
 			break
 		}
-		depth += len(curPrefix)
-		needToRestart = !validate(curNode, version)
+		//copy the prefix
+		curPrefix := append([]byte(nil), (*curNodeAddress).getPrefix()...)
+		p := checkPrefix(curPrefix, key, depth)
+		needToRestart = !validate(curNodeAddress, version)
 		if needToRestart {
 			goto restart
 		}
-		next := findChild(curNode, key, depth)
-		if next == nil {
-			if curNode.isFull() {
-				needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
-				if needToRestart {
-					goto restart
-				}
-				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
-				if needToRestart {
-					writeUnlock(parent)
-					goto restart
-				}
-				grown := curNode.grow()
-				addChild(grown, l, key, depth)
-				writeUnlockObsolete(curNode)
-				*curNodeAddress = grown
+		if p != len(curPrefix) { // prefix mismatch
+			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
+			if needToRestart {
+				goto restart
+			}
+			needToRestart = upgradeToWriteLockOrRestart(curNodeAddress, version)
+			if needToRestart {
 				writeUnlock(parent)
+				goto restart
+			}
+			newNode := newNode4()
+			addChild(newNode, l, key, depth+p)
+			addChild(newNode, *curNodeAddress, curPrefix, p)
+			newNode.setPrefix(curPrefix[:p])
+			(*curNodeAddress).setPrefix(curPrefix[p:])
+			writeUnlock(parent)
+			writeUnlock(curNodeAddress)
+			//should be atomic
+			*curNodeAddress = newNode
+			break
+		}
+		depth += len(curPrefix)
+		next := findChild(*curNodeAddress, key, depth)
+		needToRestart = !validate(curNodeAddress, version)
+		if needToRestart {
+			goto restart
+		}
+		if next == nil {
+			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
+			if needToRestart {
+				goto restart
+			}
+			needToRestart = upgradeToWriteLockOrRestart(curNodeAddress, version)
+			if needToRestart {
+				writeUnlock(parent)
+				goto restart
+			}
+			if (*curNodeAddress).isFull() {
+				grown := (*curNodeAddress).grow()
+				addChild(grown, l, key, depth)
+				writeUnlock(parent)
+				writeUnlockObsolete(curNodeAddress)
+				//should be atomic
+				*curNodeAddress = grown
 			} else {
-				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
-				if needToRestart {
-					goto restart
-				}
-				needToRestart = !validate(parent, parentVersion)
-				if needToRestart {
-					goto restart
-				}
-				addChild(curNode, l, key, depth)
-				writeUnlock(curNode)
+				addChild(*curNodeAddress, l, key, depth)
+				writeUnlock(parent)
+				writeUnlock(curNodeAddress)
 			}
 			break
 		}
@@ -116,71 +146,42 @@ restart:
 		if needToRestart {
 			goto restart
 		}
-		if curNode.getType() == nodeTypeLeaf {
-			if bytes.Equal(curNode.(*leaf).key, key) {
-				needToRestart = upgradeToWriteLockOrRestart(curNode, version)
-				if needToRestart {
-					writeUnlock(parent)
-					goto restart
-				}
-				curNode.(*leaf).val = l.val
-				writeUnlock(curNode)
-				break
-			}
-
-			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
-			if needToRestart {
-				goto restart
-			}
-			needToRestart = upgradeToWriteLockOrRestart(curNode, version)
-			if needToRestart {
-				writeUnlock(parent)
-				goto restart
-			}
-			newNode := node4{
-				childPtr:            [4]node{},
-				prefixPtr:           nil,
-				prefix:              [8]byte{},
-				keys:                [4]byte{},
-				prefixLen:           0,
-				numOfChildren:       0,
-				versionLockObsolete: &atomic.Uint64{},
-			}
-			key2 := loadKey(curNode)
-			newNode.setPrefix(getCommonPrefix(key, key2, depth))
-			depth += int(newNode.prefixLen)
-			//simd
-
-			addChild(&newNode, curNode, key2, depth)
-			addChild(&newNode, l, key, depth)
-			*curNodeAddress = &newNode
-			writeUnlock(curNode)
-			writeUnlock(parent)
-			break
-		}
-		parent = curNode
+		parent = curNodeAddress
 		parentVersion = version
 		curNodeAddress = next
 	}
-	return n
 }
-func search(n node, key []byte, depth int, parent node, versionParent uint64) (interface{}, bool) {
+
+func (t *Tree) search(key []byte, depth int, parent node, parentVersion uint64) (interface{}, bool) {
 restart:
-	curNode := n
-	if curNode == nil {
-		return nil, false
-	}
+	curNode := t.node
+	parent = nil
+	parentVersion = 0
+	depth = 0
 	for {
-		version, needToRestart := readLockOrRestart(n)
+		if curNode == nil {
+			return nil, false
+		}
+		version, needToRestart := readLockOrRestart(&curNode)
 		if needToRestart {
 			goto restart
 		}
-		needToRestart = !validate(parent, versionParent)
+		if curNode.getType() == nodeTypeLeaf {
+			curLeaf := curNode.(*leaf)
+			needToRestart = !validate(&curNode, version)
+			if needToRestart {
+				goto restart
+			}
+			if bytes.Equal(curLeaf.key, key) {
+				return curLeaf.val, true
+			}
+			return nil, false
+		}
 		pre := curNode.getPrefix()
 		p := checkPrefix(pre, key, depth)
 		l := len(pre)
 		if p != l {
-			needToRestart = !validate(n, version)
+			needToRestart = !validate(&curNode, version)
 			if needToRestart {
 				goto restart
 			}
@@ -188,25 +189,16 @@ restart:
 		}
 		depth += len(curNode.getPrefix())
 		nextAdd := findChild(curNode, key, depth)
-		needToRestart = !validate(n, version)
-		if curNode.getType() == nodeTypeLeaf {
-			l := curNode.(*leaf)
-			needToRestart = !validate(n, version)
-			if needToRestart {
-				goto restart
-			}
-			if bytes.Equal(l.key, key) {
-				return l.val, true
-			}
-			return nil, false
-		}
+		needToRestart = !validate(&curNode, version)
 		if needToRestart {
 			goto restart
 		}
 		if nextAdd != nil {
+			parent = curNode
+			parentVersion = version
 			curNode = *nextAdd
 		} else {
-			needToRestart = !validate(n, version)
+			needToRestart = !validate(&curNode, version)
 			if needToRestart {
 				goto restart
 			}
@@ -221,19 +213,19 @@ func (t *Tree) Insert(key []byte, val interface{}) {
 		val:                 val,
 		versionLockObsolete: &atomic.Uint64{},
 	}
-	t.node = insert(t.node, key, &l, 0, nil, 0)
+
+	t.insert(key, &l, 0, nil, 0)
 }
 func (t *Tree) Search(key []byte) (interface{}, bool) {
-	return search(t.node, key, 0, nil, 0)
+	return t.search(key, 0, nil, 0)
 }
 
 type node interface {
 	getType() nodeType
 	findChild(b byte) *node
-	replaceChild(uint8, node)
 	isFull() bool
 	getPrefix() []byte
-	addChild(k byte, child node)
+	addChild(k byte, child *node)
 	grow() node
 	setPrefix(prefix []byte)
 	version() *atomic.Uint64
@@ -256,22 +248,19 @@ func (l *leaf) grow() node {
 func (l *leaf) getType() nodeType {
 	return nodeTypeLeaf
 }
-func (l *leaf) replaceChild(i uint8, n node) {
-	return
-}
 func (l *leaf) isFull() bool {
 	return false
 }
 func (l *leaf) getPrefix() []byte {
 	return nil
 }
-func (l *leaf) addChild(k byte, child node) {
+func (l *leaf) addChild(k byte, child *node) {
 	return
 }
 func (l *leaf) version() *atomic.Uint64 { return l.versionLockObsolete }
 
 type node4 struct {
-	childPtr            [4]node
+	childPtr            [4]*node
 	prefixPtr           []byte
 	prefix              [MaxInlinePrefixLength]byte
 	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
@@ -284,14 +273,15 @@ func (n *node4) setPrefix(prefix []byte) {
 	length := len(prefix)
 	n.prefixLen = uint16(length)
 	if length <= MaxInlinePrefixLength {
+		n.prefix = [8]byte{}
 		copy(n.prefix[:length], prefix)
 		return
 	}
 	n.prefixPtr = prefix
 }
 func (n *node4) grow() node {
-	newNode := node16{
-		childPtr:            [16]node{},
+	newNode := &node16{
+		childPtr:            [16]*node{},
 		prefixPtr:           n.prefixPtr,
 		keys:                [16]uint8{},
 		prefix:              n.prefix,
@@ -301,7 +291,7 @@ func (n *node4) grow() node {
 	}
 	copy(newNode.keys[:], n.keys[:])
 	copy(newNode.childPtr[:], n.childPtr[:])
-	return &newNode
+	return newNode
 }
 func (n *node4) getPrefix() []byte {
 	if n.prefixLen > MaxInlinePrefixLength {
@@ -320,25 +310,22 @@ func (n *node4) findChild(b byte) *node {
 	//simple search over keys
 	for i, k := range n.keys {
 		if k == b {
-			return &n.childPtr[i]
+			return n.childPtr[i]
 		}
 	}
 	return nil
 }
-func (n *node4) addChild(k byte, child node) {
+func (n *node4) addChild(k byte, child *node) {
 	n.keys[n.numOfChildren] = k
 	n.childPtr[n.numOfChildren] = child
 	n.numOfChildren++
-}
-func (n *node4) replaceChild(idx uint8, child node) {
-	n.childPtr[idx] = child
 }
 func (n *node4) version() *atomic.Uint64 {
 	return n.versionLockObsolete
 }
 
 type node16 struct {
-	childPtr            [16]node
+	childPtr            [16]*node
 	prefixPtr           []byte
 	keys                [16]uint8
 	prefix              [MaxInlinePrefixLength]byte
@@ -347,14 +334,17 @@ type node16 struct {
 	numOfChildren       uint8
 }
 
-func (n *node16) setPrefix(prefix []byte) {
-	length := len(prefix)
+func (n *node16) setPrefix(pre []byte) {
+	length := len(pre)
 	n.prefixLen = uint16(length)
 	if length <= MaxInlinePrefixLength {
-		copy(n.prefix[:length], prefix)
+		n.prefix = [8]byte{}
+		for i := 0; i < length; i++ {
+			n.prefix[i] = pre[i]
+		}
 		return
 	}
-	n.prefixPtr = prefix
+	n.prefixPtr = pre
 }
 func (n *node16) getType() nodeType {
 	return nodeType16
@@ -363,13 +353,13 @@ func (n *node16) findChild(b byte) *node {
 	//todo use SIMD
 	for i, k := range n.keys {
 		if k == b {
-			return &n.childPtr[i]
+			return n.childPtr[i]
 		}
 	}
 	return nil
 
 }
-func (n *node16) replaceChild(idx uint8, child node) {
+func (n *node16) replaceChild(idx uint8, child *node) {
 	n.childPtr[idx] = child
 
 }
@@ -382,7 +372,7 @@ func (n *node16) getPrefix() []byte {
 	}
 	return n.prefix[:n.prefixLen]
 }
-func (n *node16) addChild(k byte, child node) {
+func (n *node16) addChild(k byte, child *node) {
 	n.keys[n.numOfChildren] = byte(k)
 	n.childPtr[n.numOfChildren] = child
 	n.numOfChildren++
@@ -393,7 +383,7 @@ func (n *node16) grow() node {
 		idxArr[i] = -1
 	}
 	newNode := node48{
-		childPtr:            [48]node{},
+		childPtr:            [48]*node{},
 		prefixPtr:           n.prefixPtr,
 		childIndex:          idxArr,
 		prefix:              n.prefix,
@@ -412,7 +402,7 @@ func (n *node16) version() *atomic.Uint64 {
 }
 
 type node48 struct {
-	childPtr            [48]node
+	childPtr            [48]*node
 	prefixPtr           []byte
 	childIndex          [256]int16
 	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
@@ -425,6 +415,7 @@ func (n *node48) setPrefix(prefix []byte) {
 	length := len(prefix)
 	n.prefixLen = uint16(length)
 	if length <= MaxInlinePrefixLength {
+		n.prefix = [8]byte{}
 		copy(n.prefix[:length], prefix)
 		return
 	}
@@ -435,16 +426,16 @@ func (n *node48) getType() nodeType {
 }
 func (n *node48) findChild(b byte) *node {
 	if n.childIndex[b] != -1 {
-		return &n.childPtr[n.childIndex[b]]
+		return n.childPtr[n.childIndex[b]]
 	}
 	return nil
 }
-func (n *node48) addChild(b byte, child node) {
+func (n *node48) addChild(b byte, child *node) {
 	n.childIndex[b] = int16(n.numOfChildren)
 	n.childPtr[n.numOfChildren] = child
 	n.numOfChildren++
 }
-func (n *node48) replaceChild(idx uint8, child node) {
+func (n *node48) replaceChild(idx uint8, child *node) {
 	n.childPtr[idx] = child
 }
 func (n *node48) isFull() bool {
@@ -458,7 +449,7 @@ func (n *node48) getPrefix() []byte {
 }
 func (n *node48) grow() node {
 	newNode := node256{
-		ChildPtr:            [256]node{},
+		ChildPtr:            [256]*node{},
 		prefixPtr:           n.prefixPtr,
 		prefixLen:           n.prefixLen,
 		prefix:              n.prefix,
@@ -476,7 +467,7 @@ func (n *node48) version() *atomic.Uint64 {
 }
 
 type node256 struct {
-	ChildPtr            [256]node
+	ChildPtr            [256]*node
 	prefixPtr           []byte
 	versionLockObsolete *atomic.Uint64 //62b version 1b lock 1b obsolete
 	prefixLen           uint16
@@ -487,6 +478,7 @@ func (n *node256) setPrefix(prefix []byte) {
 	length := len(prefix)
 	n.prefixLen = uint16(length)
 	if length <= MaxInlinePrefixLength {
+		n.prefix = [8]byte{}
 		copy(n.prefix[:length], prefix)
 		return
 	}
@@ -494,16 +486,13 @@ func (n *node256) setPrefix(prefix []byte) {
 }
 func (n *node256) findChild(b byte) *node {
 	if n.ChildPtr[b] != nil {
-		return &n.ChildPtr[b]
+		return n.ChildPtr[b]
 	}
 	return nil
 
 }
 func (n *node256) getType() nodeType {
 	return nodeType256
-}
-func (n *node256) replaceChild(idx uint8, child node) {
-	n.ChildPtr[idx] = child
 }
 func (n *node256) isFull() bool {
 	return false
@@ -514,7 +503,7 @@ func (n *node256) getPrefix() []byte {
 	}
 	return n.prefix[:n.prefixLen]
 }
-func (n *node256) addChild(b byte, child node) {
+func (n *node256) addChild(b byte, child *node) {
 	n.ChildPtr[b] = child
 }
 func (n *node256) grow() node {
@@ -549,9 +538,9 @@ func getCommonPrefix(s1 []byte, s2 []byte, depth int) []byte {
 }
 func addChild(parent node, child node, key []byte, pos int) {
 	if pos >= len(key) {
-		parent.addChild(TerminationChar, child)
+		parent.addChild(TerminationChar, &child)
 	} else {
-		parent.addChild(key[pos], child)
+		parent.addChild(key[pos], &child)
 	}
 }
 func findChild(n node, key []byte, depth int) *node {
@@ -560,46 +549,52 @@ func findChild(n node, key []byte, depth int) *node {
 	}
 	return n.findChild(key[depth])
 }
-func readLockOrRestart(n node) (uint64, bool) {
-	if n == nil {
+func readLockOrRestart(n *node) (uint64, bool) {
+	if n == nil || *n == nil {
 		return 0, false
 	}
 	ver := awaitNodeUnlocked(n)
 	//if obsolete try to restart
-	if ver&1 == 1 {
+	if ver&OBSOLETE_BIT != 0 {
 		return 0, true
 	}
 	return ver, false
 
 }
-func validate(n node, version uint64) bool {
-	if n == nil {
+func validate(n *node, version uint64) bool {
+	if n == nil || *n == nil {
 		return true
 	}
 	//atomic operation
-	ver := n.version().Load()
+	ver := (*n).version().Load()
 	return ver == version
 }
-func writeUnlock(n node) {
-	if n == nil {
+func writeUnlock(n *node) {
+	if n == nil || *n == nil {
 		return
 	}
-	n.version().Add(2)
+	(*n).version().Add(LOCK_INCREMENT)
 }
-func writeUnlockObsolete(n node) {
-	if n == nil {
+func writeUnlockObsolete(n *node) {
+	if n == nil || *n == nil {
 		return
 	}
-	// set obsolete, reset locked, overflow into version
-	n.version().Add(3)
+	// set obsolete bit and bump version in CAS loop
+	for {
+		v := (*n).version().Load()
+		desired := (v | OBSOLETE_BIT) + LOCK_INCREMENT
+		if (*n).version().CompareAndSwap(v, desired) {
+			return
+		}
+	}
 }
-func upgradeToWriteLockOrRestart(n node, version uint64) bool {
-	if n == nil {
+func upgradeToWriteLockOrRestart(n *node, version uint64) bool {
+	if n == nil || *n == nil {
 		return false
 	}
-	return !n.version().CompareAndSwap(version, setLockedBit(version))
+	return !(*n).version().CompareAndSwap(version, setLockedBit(version))
 }
-func writeLockOrRestart(n node) bool {
+func writeLockOrRestart(n *node) bool {
 	for {
 		version, needToRestart := readLockOrRestart(n)
 		if needToRestart {
@@ -615,23 +610,35 @@ func writeLockOrRestart(n node) bool {
 	return false
 }
 func setLockedBit(version uint64) uint64 {
-	return version + 2
+	return version | LOCK_BIT
 }
 
 // there is improvement in here todo
-func awaitNodeUnlocked(n node) uint64 {
-	if n == nil {
+func awaitNodeUnlocked(n *node) uint64 {
+	if n == nil || *n == nil {
 		return 0
 	}
-	version := n.version().Load()
+	version := (*n).version().Load()
 	spinCount := 0
-	for (version & 2) == 2 {
+	for (version & LOCK_BIT) == 2 {
 		if spinCount < 10 {
 			spinCount++
 		} else {
 			runtime.Gosched() // yield
 		}
-		version = n.version().Load()
+		version = (*n).version().Load()
 	}
 	return version
+}
+func newNode4() *node4 {
+	n := &node4{
+		childPtr:            [4]*node{},
+		prefixPtr:           nil,
+		prefix:              [8]byte{},
+		keys:                [4]byte{},
+		prefixLen:           0,
+		numOfChildren:       0,
+		versionLockObsolete: &atomic.Uint64{},
+	}
+	return n
 }
