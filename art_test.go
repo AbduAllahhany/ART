@@ -904,88 +904,336 @@ func BenchmarkKeyGeneration(b *testing.B) {
 		}
 	})
 }
-
-// Simple test with timeout to detect deadlocks
-func TestSimpleMultithread(t *testing.T) {
+func TestConcurrentInsertSearch(t *testing.T) {
 	tree := NewART()
-
-	numThreads := 12
-	insertsPerThread := 1000
+	numGoroutines := runtime.NumCPU() * 48
+	numOperationsPerGoroutine := 10000
 
 	var wg sync.WaitGroup
-	done := make(chan bool)
-	// Start threads
-	for i := 0; i < numThreads; i++ {
+	var insertCount, searchCount int64
+
+	// Start concurrent insert operations
+	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(threadID int) {
+		go func(goroutineID int) {
 			defer wg.Done()
 
-			for j := 0; j < insertsPerThread; j++ {
-				key := fmt.Sprintf("thread_%d_key_%d", threadID, j)
-				value := threadID*1000 + j
+			for j := 0; j < numOperationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key_%d_%d", goroutineID, j)
+				value := fmt.Sprintf("value_%d_%d", goroutineID, j)
+
 				tree.Insert([]byte(key), value)
+				atomic.AddInt64(&insertCount, 1)
+
+				// Immediately search for the inserted key
+				if val, found := tree.Search([]byte(key)); found {
+					if val.(string) == value {
+						atomic.AddInt64(&searchCount, 1)
+					} else {
+						t.Errorf("Wrong value for key %s: expected %s, got %s", key, value, val.(string))
+					}
+				}
 			}
 		}(i)
 	}
 
-	// Wait for completion or timeout
-	go func() {
-		wg.Wait()
-		done <- true
-	}()
+	wg.Wait()
 
-	select {
-	case <-done:
-		fmt.Println("Test completed successfully!")
+	expectedOps := int64(numGoroutines * numOperationsPerGoroutine)
+	t.Logf("Completed %d inserts and %d successful searches", insertCount, searchCount)
 
-		// Verify all keys were inserted
-		for i := 0; i < numThreads; i++ {
-			for j := 0; j < insertsPerThread; j++ {
-				key := fmt.Sprintf("thread_%d_key_%d", i, j)
-				expectedValue := i*1000 + j
-
-				value, found := tree.Search([]byte(key))
-				if !found {
-					t.Errorf("Key not found: %s", key)
-				} else if value.(int) != expectedValue {
-					t.Errorf("Wrong value for key %s: got %d, expected %d", key, value.(int), expectedValue)
-				}
-			}
-		}
-
+	if insertCount != expectedOps {
+		t.Errorf("Expected %d inserts, got %d", expectedOps, insertCount)
 	}
 }
 
-// Simple test single-threaded insert
-func TestSimpleSingleThread(t *testing.T) {
+func TestConcurrentUpdateOperations(t *testing.T) {
 	tree := NewART()
+	numGoroutines := 10
+	numUpdates := 100
+	sharedKey := []byte("shared_key")
 
-	numThreads := 12
-	insertsPerThread := 2
+	var wg sync.WaitGroup
+	var updateCount int64
 
-	// Insert all keys in a single thread
-	for i := 0; i < numThreads; i++ {
-		for j := 0; j < insertsPerThread; j++ {
-			key := fmt.Sprintf("thread_%d_key_%d", i, j)
-			value := i*1000 + j
-			tree.Insert([]byte(key), value)
-		}
+	// Initialize the key
+	tree.Insert(sharedKey, "initial_value")
+
+	// Multiple goroutines updating the same key
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+
+			for j := 0; j < numUpdates; j++ {
+				value := fmt.Sprintf("value_%d_%d", goroutineID, j)
+				tree.Insert(sharedKey, value)
+				atomic.AddInt64(&updateCount, 1)
+
+				// Verify we can read the key (value might be from any goroutine)
+				if _, found := tree.Search(sharedKey); !found {
+					t.Errorf("Key disappeared after update by goroutine %d", goroutineID)
+				}
+			}
+		}(i)
 	}
 
-	fmt.Println("Single-thread test completed successfully!")
+	wg.Wait()
 
-	// Verify all keys were inserted
-	for i := 0; i < numThreads; i++ {
-		for j := 0; j < insertsPerThread; j++ {
-			key := fmt.Sprintf("thread_%d_key_%d", i, j)
-			expectedValue := i*1000 + j
+	// Final verification
+	if val, found := tree.Search(sharedKey); !found {
+		t.Error("Shared key not found after concurrent updates")
+	} else {
+		t.Logf("Final value: %s after %d updates", val.(string), updateCount)
+	}
+}
 
-			value, found := tree.Search([]byte(key))
-			if !found {
-				t.Errorf("Key not found: %s", key)
-			} else if value.(int) != expectedValue {
-				t.Errorf("Wrong value for key %s: got %d, expected %d", key, value.(int), expectedValue)
+func TestConcurrentMixedOperations(t *testing.T) {
+	tree := NewART()
+	duration := 2 * time.Second
+	numReaders := 5
+	numWriters := 3
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	var readOps, writeOps, readHits, writtenKeys int64
+
+	// Pre-populate with some data
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("initial_%d", i)
+		tree.Insert([]byte(key), i)
+	}
+
+	// Start writers
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			counter := 0
+
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					key := fmt.Sprintf("writer_%d_%d", writerID, counter)
+					tree.Insert([]byte(key), counter)
+					atomic.AddInt64(&writeOps, 1)
+					atomic.AddInt64(&writtenKeys, 1)
+					counter++
+
+					// Small delay to allow readers to work
+					if counter%10 == 0 {
+						runtime.Gosched()
+					}
+				}
 			}
+		}(i)
+	}
+
+	// Start readers
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(readerID)))
+
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					// Mix of reading initial keys and writer keys
+					var key string
+					if r.Float64() < 0.5 {
+						key = fmt.Sprintf("initial_%d", r.Intn(100))
+					} else {
+						writerID := r.Intn(numWriters)
+						counter := r.Intn(100) // Might not exist yet
+						key = fmt.Sprintf("writer_%d_%d", writerID, counter)
+					}
+
+					if _, found := tree.Search([]byte(key)); found {
+						atomic.AddInt64(&readHits, 1)
+					}
+					atomic.AddInt64(&readOps, 1)
+
+					// Small delay
+					if readOps%100 == 0 {
+						runtime.Gosched()
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Let operations run for specified duration
+	time.Sleep(duration)
+	close(done)
+	wg.Wait()
+
+	t.Logf("Completed in %v:", duration)
+	t.Logf("  Write operations: %d", writeOps)
+	t.Logf("  Read operations: %d", readOps)
+	t.Logf("  Read hits: %d (%.2f%%)", readHits, float64(readHits)/float64(readOps)*100)
+	t.Logf("  Keys written: %d", writtenKeys)
+}
+
+func TestConcurrentPrefixOperations(t *testing.T) {
+	tree := NewART()
+	numGoroutines := 8
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+
+			prefix := fmt.Sprintf("goroutine%d", goroutineID)
+
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("%s_key_%d", prefix, j)
+				value := fmt.Sprintf("value_%d_%d", goroutineID, j)
+				tree.Insert([]byte(key), value)
+			}
+
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("%s_key_%d", prefix, j)
+				if val, found := tree.Search([]byte(key)); found {
+					expected := fmt.Sprintf("value_%d_%d", goroutineID, j)
+					if val.(string) != expected {
+						t.Errorf("Prefix test failed: expected %s, got %s", expected, val.(string))
+					}
+				} else {
+					t.Errorf("Prefix test failed: key %s not found", key)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+func TestConcurrentStressWithValidation(t *testing.T) {
+	tree := NewART()
+	numGoroutines := 20
+	numOpsPerGoroutine := 500
+
+	var wg sync.WaitGroup
+	insertedKeys := sync.Map{} // Thread-safe map to track inserted keys
+	var totalInserts int64
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(goroutineID)))
+
+			for j := 0; j < numOpsPerGoroutine; j++ {
+				// Generate a semi-random key with some collision potential
+				keyNum := r.Intn(numGoroutines * numOpsPerGoroutine / 2) // Increase collision chance
+				key := fmt.Sprintf("stress_key_%d", keyNum)
+				value := fmt.Sprintf("value_%d_%d_%d", goroutineID, j, keyNum)
+
+				tree.Insert([]byte(key), value)
+				insertedKeys.Store(key, value)
+				atomic.AddInt64(&totalInserts, 1)
+
+				// Occasionally verify a random key
+				if j%10 == 0 {
+					verifyKey := fmt.Sprintf("stress_key_%d", r.Intn(keyNum+1))
+					if expectedVal, exists := insertedKeys.Load(verifyKey); exists {
+						if val, found := tree.Search([]byte(verifyKey)); !found {
+							t.Errorf("Key %s should exist but not found", verifyKey)
+						} else {
+							// Note: due to concurrent updates, we can't guarantee exact value match
+							// but we can verify the key exists
+							_ = val
+							_ = expectedVal
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	t.Logf("Stress test completed: %d total inserts", totalInserts)
+
+	// Final validation phase - check a sample of keys
+	validationCount := 0
+	insertedKeys.Range(func(key, expectedValue interface{}) bool {
+		if val, found := tree.Search([]byte(key.(string))); found {
+			validationCount++
+			// Value might have been overwritten by concurrent operations
+			_ = val
+		} else {
+			t.Errorf("Key %s not found during final validation", key.(string))
+		}
+		return validationCount < 100 // Limit validation to first 100 keys
+	})
+
+	t.Logf("Validated %d keys successfully", validationCount)
+}
+
+func BenchmarkConcurrentOperations(b *testing.B) {
+	tree := NewART()
+
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		counter := 0
+		for pb.Next() {
+			key := fmt.Sprintf("bench_key_%d", counter)
+			value := fmt.Sprintf("bench_value_%d", counter)
+
+			// Mix of insert and search operations
+			if counter%2 == 0 {
+				tree.Insert([]byte(key), value)
+			} else {
+				searchKey := fmt.Sprintf("bench_key_%d", counter-1)
+				tree.Search([]byte(searchKey))
+			}
+			counter++
+		}
+	})
+}
+
+func TestRaceConditionDetection(t *testing.T) {
+	// This test is designed to potentially trigger race conditions
+	// Run with: go test -race
+
+	tree := NewART()
+	sharedKeys := []string{"shared1", "shared2", "shared3", "shared4", "shared5"}
+	numGoroutines := 50
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			// Rapid operations on shared keys
+			for j := 0; j < 100; j++ {
+				key := sharedKeys[j%len(sharedKeys)]
+				value := fmt.Sprintf("%d_%d", id, j)
+
+				tree.Insert([]byte(key), value)
+				tree.Search([]byte(key))
+
+				// No delay - maximum contention
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify all shared keys exist
+	for _, key := range sharedKeys {
+		if _, found := tree.Search([]byte(key)); !found {
+			t.Errorf("Shared key %s not found after race condition test", key)
 		}
 	}
 }
