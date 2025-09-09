@@ -2,6 +2,7 @@ package art
 
 import (
 	"bytes"
+	"log"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -9,7 +10,7 @@ import (
 
 // todo
 // 1) Implement SIMD
-// 2) Make it threadsafe
+// 2) readheavy has some issues
 // 3) Combine ART with a Bloom filter for ultra-fast negative lookups.
 // 4) Improve performance after the OLC shit
 const TerminationChar = '\xff'
@@ -267,6 +268,10 @@ func (l *leaf) addChild(k byte, child node) {
 	return
 }
 func (l *leaf) version() *atomic.Uint64 {
+	if l.versionLockObsolete == nil {
+		log.Printf("ERROR: nil versionLockObsolete  %p", l)
+		panic("nil versionLockObsolete")
+	}
 	return l.versionLockObsolete
 }
 
@@ -333,6 +338,10 @@ func (n *node4) addChild(k byte, child node) {
 	n.numOfChildren++
 }
 func (n *node4) version() *atomic.Uint64 {
+	if n.versionLockObsolete == nil {
+		log.Printf("ERROR: nil versionLockObsolete  %p", n)
+		panic("nil versionLockObsolete")
+	}
 	return n.versionLockObsolete
 }
 
@@ -406,6 +415,10 @@ func (n *node16) grow() node {
 	return &newNode
 }
 func (n *node16) version() *atomic.Uint64 {
+	if n.versionLockObsolete == nil {
+		log.Printf("ERROR: nil versionLockObsolete  %p", n)
+		panic("nil versionLockObsolete")
+	}
 	return n.versionLockObsolete
 }
 
@@ -469,6 +482,10 @@ func (n *node48) grow() node {
 	return &newNode
 }
 func (n *node48) version() *atomic.Uint64 {
+	if n.versionLockObsolete == nil {
+		log.Printf("ERROR: nil versionLockObsolete  %p", n)
+		panic("nil versionLockObsolete")
+	}
 	return n.versionLockObsolete
 }
 
@@ -516,6 +533,10 @@ func (n *node256) grow() node {
 	return nil
 }
 func (n *node256) version() *atomic.Uint64 {
+	if n.versionLockObsolete == nil {
+		log.Printf("ERROR: nil versionLockObsolete  %p", n)
+		panic("nil versionLockObsolete")
+	}
 	return n.versionLockObsolete
 }
 
@@ -621,16 +642,26 @@ func setLockedBit(version uint64) uint64 {
 
 // there is improvement in here todo
 func awaitNodeUnlocked(n node) uint64 {
+	//avoid dangling pointer with *atomic.unit64
 	if n == nil {
 		return 0
 	}
-	version := n.version().Load()
+	versionPtr := n.version()
+	var version uint64
+	if versionPtr == nil {
+		return OBSOLETE_BIT
+	}
+	version = n.version().Load()
 	spinCount := 0
-	for (version & LOCK_BIT) == 2 {
+	for (version & LOCK_BIT) == LOCK_BIT {
 		if spinCount < 10 {
 			spinCount++
 		} else {
 			runtime.Gosched() // yield
+		}
+		versionPtr = n.version()
+		if versionPtr == nil {
+			return OBSOLETE_BIT
 		}
 		version = n.version().Load()
 	}

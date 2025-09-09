@@ -1,6 +1,7 @@
 package art
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -588,7 +589,7 @@ func BenchmarkSingleThreadSearch(b *testing.B) {
 
 // Multithreaded insert benchmarks
 func BenchmarkMultiThreadInsert(b *testing.B) {
-	threadCounts := []int{1, 2, 4, 8, 16, 32}
+	threadCounts := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 10000}
 
 	for _, numThreads := range threadCounts {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
@@ -621,7 +622,7 @@ func BenchmarkMultiThreadInsert(b *testing.B) {
 
 // Multithreaded search benchmarks
 func BenchmarkMultiThreadSearch(b *testing.B) {
-	threadCounts := []int{2, 4, 8, 16, 32}
+	threadCounts := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 10000}
 
 	for _, numThreads := range threadCounts {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
@@ -873,15 +874,6 @@ func BenchmarkMemoryPressure(b *testing.B) {
 			wg.Wait()
 		})
 	}
-}
-
-// Helper function to run a comprehensive benchmark suite
-func BenchmarkFullSuite(b *testing.B) {
-	b.Run("SingleThread", BenchmarkSingleThreadInsert)
-	b.Run("MultiThread", BenchmarkMultiThreadInsert)
-	b.Run("Mixed", BenchmarkMultiThreadMixed)
-	b.Run("Contention", BenchmarkContention)
-	b.Run("Scalability", BenchmarkScalability)
 }
 
 // Utility benchmark to measure key generation overhead
@@ -1236,4 +1228,517 @@ func TestRaceConditionDetection(t *testing.T) {
 			t.Errorf("Shared key %s not found after race condition test", key)
 		}
 	}
+}
+
+// Test configuration
+const (
+	numKeys       = 100000
+	maxKeyLen     = 64
+	testDuration  = 30 * time.Second
+	maxGoroutines = 1000
+	batchSize     = 1000
+)
+
+// Test statistics
+type TestStats struct {
+	searches     int64
+	inserts      int64
+	deletes      int64
+	updates      int64
+	restarts     int64
+	errors       int64
+	totalLatency int64
+	maxLatency   int64
+	searchHits   int64
+	searchMisses int64
+}
+
+func (s *TestStats) String() string {
+	total := s.searches + s.inserts + s.deletes + s.updates
+	avgLatency := float64(s.totalLatency) / float64(total)
+
+	return fmt.Sprintf(`
+Performance Stats:
+  Operations: %d total
+  - Searches: %d (%.1f%%, hits: %d, misses: %d)
+  - Inserts:  %d (%.1f%%)
+  - Updates:  %d (%.1f%%)
+  - Deletes:  %d (%.1f%%)
+  Restarts: %d
+  Errors: %d
+  Latency: avg=%.2fns, max=%dns
+  Throughput: %.0f ops/sec
+`,
+		total,
+		s.searches, float64(s.searches)/float64(total)*100, s.searchHits, s.searchMisses,
+		s.inserts, float64(s.inserts)/float64(total)*100,
+		s.updates, float64(s.updates)/float64(total)*100,
+		s.deletes, float64(s.deletes)/float64(total)*100,
+		s.restarts, s.errors,
+		avgLatency, s.maxLatency,
+		float64(total)/testDuration.Seconds(),
+	)
+}
+
+// Test data generators
+func generateKeys(n int) [][]byte {
+	keys := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		keys[i] = generateRandomKey()
+	}
+	return keys
+}
+
+func generateRandomKey() []byte {
+	length := rand.Intn(maxKeyLen-1) + 1
+	key := make([]byte, length)
+	for i := 0; i < length; i++ {
+		key[i] = byte(rand.Intn(256))
+	}
+	return key
+}
+
+func generatePrefixKeys(prefix []byte, n int) [][]byte {
+	keys := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		suffix := generateRandomKey()
+		key := make([]byte, len(prefix)+len(suffix))
+		copy(key, prefix)
+		copy(key[len(prefix):], suffix)
+		keys[i] = key
+	}
+	return keys
+}
+
+// Test 1: Maximum Concurrency Stress Test
+func TestMaxConcurrencyStress(t *testing.T) {
+	tree := NewART() // Assuming your tree constructor
+	keys := generateKeys(numKeys)
+	stats := &TestStats{}
+
+	// Pre-populate tree
+	for i := 0; i < numKeys/2; i++ {
+		tree.Insert(keys[i], i)
+	}
+
+	fmt.Printf("Starting max concurrency test with %d goroutines...\n", maxGoroutines)
+
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for i := 0; i < maxGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			workerStats := &TestStats{}
+
+			for time.Since(start) < testDuration {
+				keyIdx := localRand.Intn(numKeys)
+				key := keys[keyIdx]
+				op := localRand.Intn(100)
+
+				opStart := time.Now()
+
+				switch {
+				case op < 70: // 70% searches
+					val, found := tree.Search(key)
+					atomic.AddInt64(&workerStats.searches, 1)
+					if found {
+						atomic.AddInt64(&workerStats.searchHits, 1)
+						if val == nil {
+							atomic.AddInt64(&workerStats.errors, 1)
+						}
+					} else {
+						atomic.AddInt64(&workerStats.searchMisses, 1)
+					}
+
+				default: // 30% inserts
+					tree.Insert(key, keyIdx)
+					atomic.AddInt64(&workerStats.inserts, 1)
+
+				}
+
+				latency := time.Since(opStart).Nanoseconds()
+				atomic.AddInt64(&workerStats.totalLatency, latency)
+
+				if latency > atomic.LoadInt64(&workerStats.maxLatency) {
+					atomic.StoreInt64(&workerStats.maxLatency, latency)
+				}
+			}
+
+			// Merge worker stats
+			atomic.AddInt64(&stats.searches, workerStats.searches)
+			atomic.AddInt64(&stats.inserts, workerStats.inserts)
+			atomic.AddInt64(&stats.deletes, workerStats.deletes)
+			atomic.AddInt64(&stats.updates, workerStats.updates)
+			atomic.AddInt64(&stats.searchHits, workerStats.searchHits)
+			atomic.AddInt64(&stats.searchMisses, workerStats.searchMisses)
+			atomic.AddInt64(&stats.totalLatency, workerStats.totalLatency)
+			atomic.AddInt64(&stats.errors, workerStats.errors)
+
+			if workerStats.maxLatency > atomic.LoadInt64(&stats.maxLatency) {
+				atomic.StoreInt64(&stats.maxLatency, workerStats.maxLatency)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
+}
+
+// Test 2: Read-Heavy Workload
+func TestReadHeavyWorkload(t *testing.T) {
+	tree := NewART()
+	keys := generateKeys(numKeys)
+	stats := &TestStats{}
+
+	// Pre-populate
+	for i, key := range keys {
+		tree.Insert(key, i)
+	}
+
+	fmt.Printf("Starting read-heavy test (95%% reads)...\n")
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	numReaders := runtime.NumCPU() * 20
+
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+
+			for time.Since(start) < testDuration {
+				keyIdx := localRand.Intn(numKeys)
+				key := keys[keyIdx]
+				op := localRand.Intn(100)
+
+				if op < 95 { // 95% reads
+					val, found := tree.Search(key)
+					atomic.AddInt64(&stats.searches, 1)
+					if found {
+						atomic.AddInt64(&stats.searchHits, 1)
+						if val.(int) != keyIdx {
+							atomic.AddInt64(&stats.errors, 1)
+						}
+					} else {
+						atomic.AddInt64(&stats.searchMisses, 1)
+					}
+				} else { // 5% writes
+					tree.Insert(generateRandomKey(), localRand.Intn(1000000))
+					atomic.AddInt64(&stats.inserts, 1)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
+}
+
+// Test 3: Write-Heavy Workload
+func TestWriteHeavyWorkload(t *testing.T) {
+	tree := NewART()
+	stats := &TestStats{}
+
+	fmt.Printf("Starting write-heavy test (80%% writes)...\n")
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	numWriters := runtime.NumCPU() * 10
+	keyCounter := int64(0)
+
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			localKeys := make([][]byte, 0, 1000)
+
+			for time.Since(start) < testDuration {
+				op := localRand.Intn(100)
+
+				switch {
+				case op < 40: // 40% inserts
+					key := generateRandomKey()
+					keyId := atomic.AddInt64(&keyCounter, 1)
+					tree.Insert(key, int(keyId))
+					localKeys = append(localKeys, key)
+					atomic.AddInt64(&stats.inserts, 1)
+				default: // 60% searches
+					if len(localKeys) > 0 {
+						key := localKeys[localRand.Intn(len(localKeys))]
+						_, found := tree.Search(key)
+						atomic.AddInt64(&stats.searches, 1)
+						if found {
+							atomic.AddInt64(&stats.searchHits, 1)
+						} else {
+							atomic.AddInt64(&stats.searchMisses, 1)
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
+}
+
+// Test 4: Hotspot Contention Test
+func TestHotspotContention(t *testing.T) {
+	tree := NewART()
+	stats := &TestStats{}
+
+	// Create hotspot keys (common prefixes)
+	hotKeys := [][]byte{
+		[]byte("user:"),
+		[]byte("session:"),
+		[]byte("cache:"),
+		[]byte("temp:"),
+		[]byte("data:"),
+	}
+
+	allKeys := make([][]byte, 0, numKeys)
+	for _, prefix := range hotKeys {
+		keys := generatePrefixKeys(prefix, numKeys/len(hotKeys))
+		allKeys = append(allKeys, keys...)
+	}
+
+	// Pre-populate
+	for i, key := range allKeys {
+		tree.Insert(key, i)
+	}
+
+	fmt.Printf("Starting hotspot contention test...\n")
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	numWorkers := runtime.NumCPU() * 4
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+
+			for time.Since(start) < testDuration {
+				// 80% operations on hotspot keys
+				var key []byte
+				if localRand.Intn(100) < 80 {
+					prefix := hotKeys[localRand.Intn(len(hotKeys))]
+					suffix := generateRandomKey()
+					key = make([]byte, len(prefix)+len(suffix))
+					copy(key, prefix)
+					copy(key[len(prefix):], suffix)
+				} else {
+					key = allKeys[localRand.Intn(len(allKeys))]
+				}
+
+				op := localRand.Intn(100)
+				switch {
+				case op < 60: // 60% searches
+					_, found := tree.Search(key)
+					atomic.AddInt64(&stats.searches, 1)
+					if found {
+						atomic.AddInt64(&stats.searchHits, 1)
+					} else {
+						atomic.AddInt64(&stats.searchMisses, 1)
+					}
+
+				default: // 40% inserts
+					tree.Insert(key, localRand.Intn(1000000))
+					atomic.AddInt64(&stats.inserts, 1)
+
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
+}
+
+// Test 5: Memory Pressure Test
+func TestMemoryPressure(t *testing.T) {
+	trees := make([]Tree, 100)
+	for i := range trees {
+		trees[i] = NewART()
+	}
+
+	stats := &TestStats{}
+
+	fmt.Printf("Starting memory pressure test with 100 trees...\n")
+
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	// Memory pressure goroutine
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for time.Since(start) < testDuration {
+			<-ticker.C
+			runtime.GC()
+			runtime.GC() // Force aggressive GC
+		}
+	}()
+
+	numWorkers := runtime.NumCPU() * 8
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+
+			for time.Since(start) < testDuration {
+				treeIdx := localRand.Intn(len(trees))
+				tree := trees[treeIdx]
+				key := generateRandomKey()
+
+				op := localRand.Intn(100)
+				switch {
+				case op < 50: // 50% searches
+					_, found := tree.Search(key)
+					atomic.AddInt64(&stats.searches, 1)
+					if found {
+						atomic.AddInt64(&stats.searchHits, 1)
+					} else {
+						atomic.AddInt64(&stats.searchMisses, 1)
+					}
+
+				case op < 80: // 30% inserts
+					tree.Insert(key, localRand.Intn(1000000))
+					atomic.AddInt64(&stats.inserts, 1)
+
+				default: // 20% deletes
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
+}
+
+// Test 6: Burst Load Test
+func TestBurstLoad(t *testing.T) {
+	tree := NewART()
+	stats := &TestStats{}
+
+	fmt.Printf("Starting burst load test...\n")
+
+	start := time.Now()
+
+	for burst := 0; burst < 10 && time.Since(start) < testDuration; burst++ {
+		fmt.Printf("Burst %d...\n", burst+1)
+
+		var wg sync.WaitGroup
+		burstWorkers := 200 + burst*50 // Escalating load
+
+		for i := 0; i < burstWorkers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				for j := 0; j < batchSize; j++ {
+					key := generateRandomKey()
+
+					// Rapid fire operations
+					tree.Insert(key, j)
+					atomic.AddInt64(&stats.inserts, 1)
+
+					_, found := tree.Search(key)
+					atomic.AddInt64(&stats.searches, 1)
+					if found {
+						atomic.AddInt64(&stats.searchHits, 1)
+					}
+				}
+			}()
+		}
+
+		wg.Wait()
+		time.Sleep(100 * time.Millisecond) // Brief pause between bursts
+	}
+
+	fmt.Print(stats.String())
+}
+
+// Test 7: Pathological Cases
+func TestPathologicalCases(t *testing.T) {
+	tree := NewART()
+	stats := &TestStats{}
+
+	fmt.Printf("Starting pathological cases test...\n")
+
+	// Generate pathological keys
+	pathologicalKeys := make([][]byte, 0, numKeys)
+
+	// Long common prefixes
+	commonPrefix := bytes.Repeat([]byte("a"), 50)
+	for i := 0; i < numKeys/4; i++ {
+		key := make([]byte, len(commonPrefix)+4)
+		copy(key, commonPrefix)
+		binary.BigEndian.PutUint32(key[len(commonPrefix):], uint32(i))
+		pathologicalKeys = append(pathologicalKeys, key)
+	}
+
+	// Very long keys
+	for i := 0; i < numKeys/4; i++ {
+		key := bytes.Repeat([]byte("b"), 200+i%100)
+		pathologicalKeys = append(pathologicalKeys, key)
+	}
+
+	// Sequential keys
+	for i := 0; i < numKeys/4; i++ {
+		key := make([]byte, 8)
+		binary.BigEndian.PutUint64(key, uint64(i))
+		pathologicalKeys = append(pathologicalKeys, key)
+	}
+
+	// Random remaining
+	for i := len(pathologicalKeys); i < numKeys; i++ {
+		pathologicalKeys = append(pathologicalKeys, generateRandomKey())
+	}
+
+	// Pre-populate
+	for i, key := range pathologicalKeys {
+		tree.Insert(key, i)
+	}
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	numWorkers := runtime.NumCPU() * 12
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+			for time.Since(start) < testDuration {
+				key := pathologicalKeys[localRand.Intn(len(pathologicalKeys))]
+
+				_, found := tree.Search(key)
+				atomic.AddInt64(&stats.searches, 1)
+				if found {
+					atomic.AddInt64(&stats.searchHits, 1)
+				} else {
+					atomic.AddInt64(&stats.searchMisses, 1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	fmt.Print(stats.String())
 }
