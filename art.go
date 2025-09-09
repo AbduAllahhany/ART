@@ -9,7 +9,6 @@ import (
 )
 
 // todo
-// 1) Implement SIMD
 // 2) readheavy has some issues
 // 3) Combine ART with a Bloom filter for ultra-fast negative lookups.
 // 4) Improve performance after the OLC shit
@@ -73,7 +72,7 @@ restart:
 				writeUnlock(parent)
 				goto restart
 			}
-			if bytes.Equal(curNode.(*leaf).key, key) {
+			if len((*curNodeAddress).(*leaf).key) == len(key) && bytes.Equal(curNode.(*leaf).key, key) {
 				(*curNodeAddress).(*leaf).val = l.val
 				writeUnlock(parent)
 				writeUnlock(curNode)
@@ -87,11 +86,9 @@ restart:
 			addChild(newNode, curNode, key2, depth)
 			addChild(newNode, l, key, depth)
 			*curNodeAddress = newNode
-
 			writeUnlock(parent)
 			writeUnlock(curNode)
 			writeUnlock(newNode)
-
 			break
 		}
 		//copy the prefix
@@ -172,6 +169,10 @@ restart:
 		if needToRestart {
 			goto restart
 		}
+		needToRestart = !validate(parent, parentVersion)
+		if needToRestart {
+			goto restart
+		}
 		curNode := *curNodeAddress
 		if curNode == nil {
 			return nil, false
@@ -182,7 +183,7 @@ restart:
 			if needToRestart {
 				goto restart
 			}
-			if bytes.Equal(curLeaf.key, key) {
+			if len(curLeaf.key) == len(key) && bytes.Equal(curLeaf.key, key) {
 				return curLeaf.val, true
 			}
 			return nil, false
@@ -197,7 +198,7 @@ restart:
 			}
 			return nil, false
 		}
-		depth += len(curNode.getPrefix())
+		depth += len(pre)
 		nextAdd := findChild(curNode, key, depth)
 		needToRestart = !validate(curNode, version)
 		if needToRestart {
@@ -324,11 +325,17 @@ func (n *node4) isFull() bool {
 	return n.numOfChildren == 4
 }
 func (n *node4) findChild(b byte) *node {
-	//simple search over keys
-	for i, k := range n.keys {
-		if k == b {
-			return &n.childPtr[i]
-		}
+	if n.numOfChildren > 0 && n.keys[0] == b {
+		return &n.childPtr[0]
+	}
+	if n.numOfChildren > 1 && n.keys[1] == b {
+		return &n.childPtr[1]
+	}
+	if n.numOfChildren > 2 && n.keys[2] == b {
+		return &n.childPtr[2]
+	}
+	if n.numOfChildren > 3 && n.keys[3] == b {
+		return &n.childPtr[3]
 	}
 	return nil
 }
@@ -371,14 +378,21 @@ func (n *node16) getType() nodeType {
 	return nodeType16
 }
 func (n *node16) findChild(b byte) *node {
-	//todo use SIMD
-	for i, k := range n.keys {
-		if k == b {
+	for i := 0; i < 16; i += 4 {
+		if n.keys[i] == b {
 			return &n.childPtr[i]
+		}
+		if n.keys[i+1] == b {
+			return &n.childPtr[i+1]
+		}
+		if n.keys[i+2] == b {
+			return &n.childPtr[i+2]
+		}
+		if n.keys[i+3] == b {
+			return &n.childPtr[i+3]
 		}
 	}
 	return nil
-
 }
 func (n *node16) isFull() bool {
 	return n.numOfChildren == 16
@@ -580,13 +594,28 @@ func readLockOrRestart(n node) (uint64, bool) {
 	if n == nil {
 		return 0, false
 	}
-	ver := awaitNodeUnlocked(n)
-	//if obsolete try to restart
-	if ver&OBSOLETE_BIT != 0 {
-		return 0, true
+	versionPtr := n.version()
+	if versionPtr == nil {
+		return OBSOLETE_BIT, true
 	}
-	return ver, false
+	version := versionPtr.Load()
 
+	if (version & LOCK_BIT) != 0 {
+		for i := 0; i < 8; i++ {
+			version = versionPtr.Load()
+			if (version & LOCK_BIT) == 0 {
+				break
+			}
+		}
+		for (version & LOCK_BIT) != 0 {
+			runtime.Gosched()
+			if n.version() == nil {
+				return OBSOLETE_BIT, true
+			}
+			version = versionPtr.Load()
+		}
+	}
+	return version, (version & OBSOLETE_BIT) != 0
 }
 func validate(n node, version uint64) bool {
 	if n == nil {
@@ -640,33 +669,6 @@ func setLockedBit(version uint64) uint64 {
 	return version | LOCK_BIT
 }
 
-// there is improvement in here todo
-func awaitNodeUnlocked(n node) uint64 {
-	//avoid dangling pointer with *atomic.unit64
-	if n == nil {
-		return 0
-	}
-	versionPtr := n.version()
-	var version uint64
-	if versionPtr == nil {
-		return OBSOLETE_BIT
-	}
-	version = n.version().Load()
-	spinCount := 0
-	for (version & LOCK_BIT) == LOCK_BIT {
-		if spinCount < 10 {
-			spinCount++
-		} else {
-			runtime.Gosched() // yield
-		}
-		versionPtr = n.version()
-		if versionPtr == nil {
-			return OBSOLETE_BIT
-		}
-		version = n.version().Load()
-	}
-	return version
-}
 func newNode4Locked() *node4 {
 	n := &node4{
 		childPtr:            [4]node{},
