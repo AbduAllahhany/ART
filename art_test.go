@@ -71,7 +71,7 @@ type ContentionStats struct {
 var globalStats ContentionStats
 
 func TestBasicInsertAndSearch(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 
 	tree.Insert([]byte("hello"), "world")
 	val, found := tree.Search([]byte("hello"))
@@ -90,7 +90,7 @@ func TestBasicInsertAndSearch(t *testing.T) {
 }
 
 func TestMultipleInsertions(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	testData := []string{
 		"apple",
@@ -120,7 +120,7 @@ func TestMultipleInsertions(t *testing.T) {
 }
 
 func TestPrefixHandling(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	tree.Insert([]byte("test"), 1)
 	tree.Insert([]byte("testing"), 2)
@@ -148,7 +148,7 @@ func TestPrefixHandling(t *testing.T) {
 }
 
 func TestEmptyString(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 
 	tree.Insert([]byte(""), "empty")
 	val, found := tree.Search([]byte(""))
@@ -161,7 +161,7 @@ func TestEmptyString(t *testing.T) {
 }
 
 func TestSingleCharacterKeys(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	for i := 0; i < 10; i++ {
 		key := string(rune('a' + i))
@@ -181,7 +181,7 @@ func TestSingleCharacterKeys(t *testing.T) {
 }
 
 func TestNodeGrowth(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	// Test growth from node4 to node16
 	keys := make([]string, 20)
@@ -203,7 +203,7 @@ func TestNodeGrowth(t *testing.T) {
 }
 
 func TestLargeNodeGrowth(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	// Test growth to node48 and node256
 	keys := make([]string, 100)
@@ -225,7 +225,7 @@ func TestLargeNodeGrowth(t *testing.T) {
 }
 
 func TestOverwriteValue(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 
 	// Insert initial value
 	tree.Insert([]byte("key"), "value1")
@@ -246,7 +246,7 @@ func TestOverwriteValue(t *testing.T) {
 }
 
 func TestSpecialCharacters(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 
 	specialKeys := []string{
 		"key with spaces",
@@ -275,7 +275,7 @@ func TestSpecialCharacters(t *testing.T) {
 }
 
 func TestLongKeys(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 
 	longKey1 := strings.Repeat("a", 1000)
 	longKey2 := strings.Repeat("b", 1000)
@@ -302,7 +302,7 @@ func TestLongKeys(t *testing.T) {
 }
 
 func TestRandomInsertions(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	rand.Seed(42) // For reproducible tests
 
 	const numKeys = 1000
@@ -333,7 +333,7 @@ func TestRandomInsertions(t *testing.T) {
 }
 
 func TestMaxConcurrencyStress(t *testing.T) {
-	tree := NewART() // Assuming your tree constructor
+	tree := NewART[int]() // Assuming your tree constructor
 	keys := generateRandomKeys(numKeys)
 	stats := &TestStats{}
 
@@ -419,7 +419,7 @@ func TestMaxConcurrencyStress(t *testing.T) {
 }
 
 func TestReadHeavyWorkload(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	keys := generateRandomKeys(numKeys)
 	stats := &TestStats{}
 
@@ -470,7 +470,7 @@ func TestReadHeavyWorkload(t *testing.T) {
 }
 
 func TestWriteHeavyWorkload(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	stats := &TestStats{}
 
 	fmt.Printf("Starting write-heavy test (80%% writes)...\n")
@@ -519,7 +519,7 @@ func TestWriteHeavyWorkload(t *testing.T) {
 }
 
 func TestHotspotContention(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	stats := &TestStats{}
 
 	// Create hotspot keys (common prefixes)
@@ -593,7 +593,7 @@ func TestHotspotContention(t *testing.T) {
 }
 
 func TestBurstLoad(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	stats := &TestStats{}
 
 	fmt.Printf("Starting burst load test...\n")
@@ -635,7 +635,7 @@ func TestBurstLoad(t *testing.T) {
 }
 
 func TestPathologicalCases(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	stats := &TestStats{}
 
 	fmt.Printf("Starting pathological cases test...\n")
@@ -705,7 +705,7 @@ func TestPathologicalCases(t *testing.T) {
 }
 
 func TestConcurrentInsertSearch(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 	numGoroutines := 1000
 	numOperationsPerGoroutine := 10000
 
@@ -748,7 +748,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 }
 
 func TestConcurrentUpdateOperations(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 	numGoroutines := 10
 	numUpdates := 100
 	sharedKey := []byte("shared_key")
@@ -789,7 +789,7 @@ func TestConcurrentUpdateOperations(t *testing.T) {
 }
 
 func TestConcurrentMixedOperations(t *testing.T) {
-	tree := NewART()
+	tree := NewART[int]()
 	duration := 2 * time.Second
 	numReaders := 5
 	numWriters := 3
@@ -880,7 +880,7 @@ func TestConcurrentMixedOperations(t *testing.T) {
 }
 
 func TestConcurrentPrefixOperations(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 	numGoroutines := 8
 
 	var wg sync.WaitGroup
@@ -916,7 +916,7 @@ func TestConcurrentPrefixOperations(t *testing.T) {
 }
 
 func TestConcurrentStressWithValidation(t *testing.T) {
-	tree := NewART()
+	tree := NewART[string]()
 	numGoroutines := 20
 	numOpsPerGoroutine := 500
 
@@ -979,7 +979,7 @@ func TestConcurrentStressWithValidation(t *testing.T) {
 }
 
 func BenchmarkInsertSequential(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -989,7 +989,7 @@ func BenchmarkInsertSequential(b *testing.B) {
 }
 
 func BenchmarkInsertRandom(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	rand.Seed(42)
 	keys := make([]string, b.N)
 
@@ -1004,7 +1004,7 @@ func BenchmarkInsertRandom(b *testing.B) {
 }
 
 func BenchmarkSearchExisting(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	const numKeys = 100000
 
 	keys := make([]string, numKeys)
@@ -1021,7 +1021,7 @@ func BenchmarkSearchExisting(b *testing.B) {
 }
 
 func BenchmarkSearchNonExisting(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	const numKeys = 100000
 
 	for i := 0; i < numKeys; i++ {
@@ -1037,7 +1037,7 @@ func BenchmarkSearchNonExisting(b *testing.B) {
 }
 
 func BenchmarkSearchRandomExisting(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	const numKeys = 100000
 	rand.Seed(42)
 
@@ -1055,7 +1055,7 @@ func BenchmarkSearchRandomExisting(b *testing.B) {
 }
 
 func BenchmarkInsertShortKeys(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -1065,7 +1065,7 @@ func BenchmarkInsertShortKeys(b *testing.B) {
 }
 
 func BenchmarkInsertLongKeys(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -1075,7 +1075,7 @@ func BenchmarkInsertLongKeys(b *testing.B) {
 }
 
 func BenchmarkInsertCommonPrefix(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	prefix := "common_prefix_for_all_keys_"
 	b.ResetTimer()
 
@@ -1086,7 +1086,7 @@ func BenchmarkInsertCommonPrefix(b *testing.B) {
 }
 
 func BenchmarkSearchCommonPrefix(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	prefix := "common_prefix_for_all_keys_"
 	const numKeys = 100000
 
@@ -1104,7 +1104,7 @@ func BenchmarkSearchCommonPrefix(b *testing.B) {
 }
 
 func BenchmarkMixedOperations(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	rand.Seed(42)
 
 	b.ResetTimer()
@@ -1122,13 +1122,13 @@ func BenchmarkMixedOperations(b *testing.B) {
 func BenchmarkMemoryUsage(b *testing.B) {
 	for n := 1000; n <= 1000000; n *= 10 {
 		b.Run(fmt.Sprintf("Keys_%d", n), func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				// Create fresh tree for each iteration
-				tree = NewART()
+				tree = NewART[int]()
 
 				b.StartTimer()
 				for j := 0; j < n; j++ {
@@ -1151,7 +1151,7 @@ func BenchmarkCompareWithMap_Insert(b *testing.B) {
 		}
 	})
 	b.Run("ART", func(b *testing.B) {
-		tree := NewART()
+		tree := NewART[int]()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			key := fmt.Sprintf("key_%010d", i)
@@ -1165,7 +1165,7 @@ func BenchmarkCompareWithMap_Search(b *testing.B) {
 	const numKeys = 100000
 
 	// Setup ART
-	tree := NewART()
+	tree := NewART[int]()
 	keys := make([]string, numKeys)
 	for i := 0; i < numKeys; i++ {
 		keys[i] = fmt.Sprintf("key_%010d", i)
@@ -1196,7 +1196,7 @@ func BenchmarkCompareWithMap_Search(b *testing.B) {
 }
 
 func BenchmarkStressTest(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	rand.Seed(time.Now().UnixNano())
 
 	for i := 0; i < 10000; i++ {
@@ -1221,7 +1221,7 @@ func BenchmarkStressTest(b *testing.B) {
 }
 
 func BenchmarkSingleThreadInsert(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	keys := generateRandomKeys(b.N)
 
 	b.ResetTimer()
@@ -1231,7 +1231,7 @@ func BenchmarkSingleThreadInsert(b *testing.B) {
 }
 
 func BenchmarkSingleThreadSearch(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	keys := generateRandomKeys(10000)
 
 	// Pre-populate the tree
@@ -1250,7 +1250,7 @@ func BenchmarkMultiThreadInsert(b *testing.B) {
 
 	for _, numThreads := range threadCounts {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 			keys := generateRandomKeys(b.N)
 
 			var wg sync.WaitGroup
@@ -1282,7 +1282,7 @@ func BenchmarkMultiThreadSearch(b *testing.B) {
 
 	for _, numThreads := range threadCounts {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 			keys := generateRandomKeys(100000)
 
 			// Pre-populate the tree
@@ -1325,7 +1325,7 @@ func BenchmarkMultiThreadMixed(b *testing.B) {
 	for _, ratio := range ratios {
 		for _, numThreads := range threadCounts {
 			b.Run(fmt.Sprintf("%s-Threads-%d", ratio.name, numThreads), func(b *testing.B) {
-				tree := NewART()
+				tree := NewART[int]()
 				keys := generateRandomKeys(100000)
 
 				// Pre-populate with some initial data
@@ -1372,7 +1372,7 @@ func BenchmarkContention(b *testing.B) {
 
 	for _, scenario := range scenarioTypes {
 		b.Run(scenario.name, func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 			keys := scenario.fn(b.N)
 			numThreads := runtime.GOMAXPROCS(0)
 
@@ -1401,7 +1401,7 @@ func BenchmarkContention(b *testing.B) {
 }
 
 func BenchmarkContentionAnalysis(b *testing.B) {
-	tree := NewART()
+	tree := NewART[int]()
 	keys := generateRandomKeys(b.N)
 	numThreads := runtime.GOMAXPROCS(0)
 
@@ -1451,7 +1451,7 @@ func BenchmarkScalability(b *testing.B) {
 
 	for numThreads := 1; numThreads <= maxThreads; numThreads *= 2 {
 		b.Run(fmt.Sprintf("Threads-%d", numThreads), func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 
 			var wg sync.WaitGroup
 			opsPerThread := b.N / numThreads
@@ -1484,7 +1484,7 @@ func BenchmarkMemoryPressure(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("Size-%d", size), func(b *testing.B) {
-			tree := NewART()
+			tree := NewART[int]()
 			keys := generateRandomKeys(size)
 			numThreads := runtime.GOMAXPROCS(0)
 
@@ -1518,7 +1518,7 @@ func BenchmarkMemoryPressure(b *testing.B) {
 }
 
 func BenchmarkConcurrentOperations(b *testing.B) {
-	tree := NewART()
+	tree := NewART[string]()
 
 	b.ResetTimer()
 

@@ -30,17 +30,17 @@ const (
 	nodeType256
 )
 
-type Tree struct {
+type Tree[T any] struct {
 	node node
 }
 
-func NewART() *Tree {
-	return &Tree{
+func NewART[T any]() *Tree[T] {
+	return &Tree[T]{
 		node: newNode4(),
 	}
 }
 
-func (t *Tree) insert(key []byte, l *leaf, depth int, parent node, parentVersion uint64) {
+func (t *Tree[T]) insert(key []byte, l *leaf, depth int, parent node, parentVersion uint64) {
 restart:
 	parent = nil
 	parentVersion = 0
@@ -76,7 +76,7 @@ restart:
 				break
 			}
 			newNode := newNode4()
-			key2 := loadKey(curNode)
+			key2 := curNode.(*leaf).key
 			commonPrefix := getCommonPrefix(key, key2, depth)
 			newNode.setPrefix(commonPrefix)
 			depth += int(newNode.prefixLen)
@@ -153,7 +153,7 @@ restart:
 	}
 }
 
-func (t *Tree) search(key []byte, depth int, parent node, parentVersion uint64) (interface{}, bool) {
+func (t *Tree[T]) search(key []byte, depth int, parent node, parentVersion uint64) (interface{}, bool) {
 restart:
 	curNodeAddress := &t.node
 	parent = nil
@@ -176,6 +176,10 @@ restart:
 			goto restart
 		}
 		if curNode.getType() == nodeTypeLeaf {
+			needToRestart = !validate(curNode, version)
+			if needToRestart {
+				goto restart
+			}
 			curLeaf := curNode.(*leaf)
 			if len(curLeaf.key) == len(key) && bytes.Equal(curLeaf.key, key) {
 				needToRestart = !validate(curNode, version)
@@ -216,16 +220,15 @@ restart:
 	}
 	return nil, false
 }
-func (t *Tree) Insert(key []byte, val interface{}) {
+func (t *Tree[T]) Insert(key []byte, val T) {
 	l := &leaf{
 		key:                 key,
-		val:                 val,
 		versionLockObsolete: &atomic.Uint64{},
+		val:                 val,
 	}
-
 	t.insert(key, l, 0, nil, 0)
 }
-func (t *Tree) Search(key []byte) (interface{}, bool) {
+func (t *Tree[T]) Search(key []byte) (interface{}, bool) {
 	return t.search(key, 0, nil, 0)
 }
 
@@ -554,10 +557,6 @@ func (n *node256) version() *atomic.Uint64 {
 }
 
 // helper function
-func loadKey(n node) []byte {
-	l := n.(*leaf)
-	return l.key
-}
 func checkPrefix(prefix []byte, key []byte, depth int) int {
 	length := 0
 	for length = 0; length < len(prefix); length++ {
@@ -590,10 +589,12 @@ func findChild(n node, key []byte, depth int) *node {
 	return n.findChild(key[depth])
 }
 func readLockOrRestart(n node) (uint64, bool) {
-	if n == nil || reflect.DeepEqual(n, nil) {
+	if n == nil {
 		return OBSOLETE_BIT, true
 	}
-
+	if rv := reflect.ValueOf(n); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return OBSOLETE_BIT, true
+	}
 	versionPtr := n.version()
 	if versionPtr == nil {
 		return OBSOLETE_BIT, true
