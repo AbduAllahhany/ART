@@ -292,7 +292,6 @@ The implementation includes several performance optimizations:
 This implementation is based on the following research and resources:
 
 - [Original ART Paper](https://db.in.tum.de/~leis/papers/ART.pdf) - Viktor Leis et al.
-- [Optimistic Lock Coupling](https://15445.courses.cs.cmu.edu/fall2020/papers/09-indexconcurrency/leis-damon2016.pdf) - Concurrency control techniques
 - [ART Paper Notes](https://www.the-paper-trail.org/post/art-paper-notes/)
+- [ART Sync](https://db.in.tum.de/~leis/papers/artsync.pdf)
 - [Index Concurrency Control (CMU)](https://www.youtube.com/watch?v=lgUNTj0Q54M&list=PLSE8ODhjZXjYDBpQnSymaectKjxCy6BYq&index=11)
-- [RCU for non-kernel programmers](https://www.youtube.com/watch?v=rxQ5K9lo034)
