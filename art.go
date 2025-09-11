@@ -3,8 +3,8 @@ package art
 import (
 	"bytes"
 	"log"
+	"reflect"
 	"runtime"
-	"sync"
 	"sync/atomic"
 )
 
@@ -12,7 +12,7 @@ import (
 // 2) readheavy has some issues
 // 3) Combine ART with a Bloom filter for ultra-fast negative lookups.
 // 4) Improve performance after the OLC shit
-const TerminationChar = '\xff'
+const TerminationChar = '\x00'
 const MaxInlinePrefixLength = 8
 const (
 	OBSOLETE_BIT   = uint64(1)
@@ -31,13 +31,12 @@ const (
 )
 
 type Tree struct {
-	node     node
-	rootLock sync.Mutex
+	node node
 }
 
-func NewART() Tree {
-	return Tree{
-		node: nil,
+func NewART() *Tree {
+	return &Tree{
+		node: newNode4(),
 	}
 }
 
@@ -48,19 +47,17 @@ restart:
 	depth = 0
 	curNodeAddress := &t.node
 	for {
-		version, needToRestart := readLockOrRestart(*curNodeAddress)
+		if curNodeAddress == nil {
+			return
+		}
+		curNode := *curNodeAddress
+		version, needToRestart := readLockOrRestart(curNode)
 		if needToRestart {
 			goto restart
 		}
-		curNode := *curNodeAddress
-		if curNode == nil {
-			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
-			if needToRestart {
-				goto restart
-			}
-			*curNodeAddress = l
-			writeUnlock(parent)
-			break
+		needToRestart = !validate(curNode, version)
+		if needToRestart {
+			goto restart
 		}
 		if curNode.getType() == nodeTypeLeaf {
 			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
@@ -72,13 +69,13 @@ restart:
 				writeUnlock(parent)
 				goto restart
 			}
-			if len((*curNodeAddress).(*leaf).key) == len(key) && bytes.Equal(curNode.(*leaf).key, key) {
+			if len(curNode.(*leaf).key) == len(key) && bytes.Equal(curNode.(*leaf).key, key) {
 				(*curNodeAddress).(*leaf).val = l.val
 				writeUnlock(parent)
 				writeUnlock(curNode)
 				break
 			}
-			newNode := newNode4Locked()
+			newNode := newNode4()
 			key2 := loadKey(curNode)
 			commonPrefix := getCommonPrefix(key, key2, depth)
 			newNode.setPrefix(commonPrefix)
@@ -88,17 +85,15 @@ restart:
 			*curNodeAddress = newNode
 			writeUnlock(parent)
 			writeUnlock(curNode)
-			writeUnlock(newNode)
 			break
 		}
-		//copy the prefix
-		curPrefix := append([]byte(nil), curNode.getPrefix()...)
-		p := checkPrefix(curPrefix, key, depth)
+		curPrefixPtr := curNode.getPrefix()
 		needToRestart = !validate(curNode, version)
 		if needToRestart {
 			goto restart
 		}
-		if p != len(curPrefix) { // prefix mismatch
+		p := checkPrefix(curPrefixPtr, key, depth)
+		if p != len(curPrefixPtr) { // prefix mismatch
 			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
 			if needToRestart {
 				goto restart
@@ -108,7 +103,8 @@ restart:
 				writeUnlock(parent)
 				goto restart
 			}
-			newNode := newNode4Locked()
+			newNode := newNode4()
+			curPrefix := append([]byte(nil), curPrefixPtr...)
 			addChild(newNode, l, key, depth+p)
 			addChild(newNode, curNode, curPrefix, p)
 			newNode.setPrefix(curPrefix[:p])
@@ -116,16 +112,15 @@ restart:
 			*curNodeAddress = newNode
 			writeUnlock(parent)
 			writeUnlock(curNode)
-			writeUnlock(newNode)
 			break
 		}
-		depth += len(curPrefix)
+		depth += len(curPrefixPtr)
 		next := findChild(curNode, key, depth)
 		needToRestart = !validate(curNode, version)
 		if needToRestart {
 			goto restart
 		}
-		if next == nil {
+		if next == nil || *next == nil {
 			needToRestart = upgradeToWriteLockOrRestart(parent, parentVersion)
 			if needToRestart {
 				goto restart
@@ -136,12 +131,11 @@ restart:
 				goto restart
 			}
 			if curNode.isFull() {
-				grown := growLocked(curNode)
+				grown := curNode.grow()
 				addChild(grown, l, key, depth)
 				*curNodeAddress = grown
 				writeUnlock(parent)
 				writeUnlockObsolete(curNode)
-				writeUnlock(grown)
 			} else {
 				addChild(*curNodeAddress, l, key, depth)
 				writeUnlock(parent)
@@ -152,6 +146,10 @@ restart:
 		parent = curNode
 		parentVersion = version
 		curNodeAddress = next
+		needToRestart = !validate(curNode, version)
+		if needToRestart {
+			goto restart
+		}
 	}
 }
 
@@ -162,10 +160,14 @@ restart:
 	parentVersion = 0
 	depth = 0
 	for {
-		if curNodeAddress == nil || *curNodeAddress == nil {
+		if curNodeAddress == nil {
 			return nil, false
 		}
-		version, needToRestart := readLockOrRestart(*curNodeAddress)
+		curNode := *curNodeAddress
+		if curNode == nil {
+			return nil, false
+		}
+		version, needToRestart := readLockOrRestart(curNode)
 		if needToRestart {
 			goto restart
 		}
@@ -173,17 +175,13 @@ restart:
 		if needToRestart {
 			goto restart
 		}
-		curNode := *curNodeAddress
-		if curNode == nil {
-			return nil, false
-		}
 		if curNode.getType() == nodeTypeLeaf {
 			curLeaf := curNode.(*leaf)
-			needToRestart = !validate(curNode, version)
-			if needToRestart {
-				goto restart
-			}
 			if len(curLeaf.key) == len(key) && bytes.Equal(curLeaf.key, key) {
+				needToRestart = !validate(curNode, version)
+				if needToRestart {
+					goto restart
+				}
 				return curLeaf.val, true
 			}
 			return nil, false
@@ -297,6 +295,7 @@ func (n *node4) setPrefix(prefix []byte) {
 	n.prefixPtr = prefix
 }
 func (n *node4) grow() node {
+
 	newNode := &node16{
 		childPtr:            [16]node{},
 		prefixPtr:           n.prefixPtr,
@@ -591,9 +590,10 @@ func findChild(n node, key []byte, depth int) *node {
 	return n.findChild(key[depth])
 }
 func readLockOrRestart(n node) (uint64, bool) {
-	if n == nil {
-		return 0, false
+	if n == nil || reflect.DeepEqual(n, nil) {
+		return OBSOLETE_BIT, true
 	}
+
 	versionPtr := n.version()
 	if versionPtr == nil {
 		return OBSOLETE_BIT, true
@@ -669,7 +669,7 @@ func setLockedBit(version uint64) uint64 {
 	return version | LOCK_BIT
 }
 
-func newNode4Locked() *node4 {
+func newNode4() *node4 {
 	n := &node4{
 		childPtr:            [4]node{},
 		prefixPtr:           nil,
@@ -679,11 +679,5 @@ func newNode4Locked() *node4 {
 		numOfChildren:       0,
 		versionLockObsolete: &atomic.Uint64{},
 	}
-	n.version().Store(setLockedBit(0))
 	return n
-}
-func growLocked(n node) node {
-	newNode := n.grow()
-	newNode.version().Store(setLockedBit(0))
-	return newNode
 }
